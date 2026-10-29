@@ -1,0 +1,65 @@
+:root {
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  color: #243732;
+  background: #f6f8f7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  font-weight: 400;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #dde5e1;
+  background: white;
+  color: inherit;
+  border-radius: 7px;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+button:hover {
+  background: #f0f6f3;
+  border-color: #a4c4b8;
+}
+button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid #7fbbaa;
+  outline-offset: 3px;
+}
+button svg {
+  flex-shrink: 0;
+}
+small {
+  font-size: 11px;
+}
+input,
+textarea,
+select {
+  border: 1px solid #d7e1dc;
+  border-radius: 5px;
+  padding: 7px;
+  background: white;
+  color: inherit;
+}
