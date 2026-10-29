@@ -12,6 +12,7 @@ import {
 import type { EditorPage } from "./pdf";
 import type { TextBox } from "./text-boxes";
 import type { TextReplacement } from "./text-edit";
+import type { ReactNode, Dispatch, SetStateAction } from "react";
 
 export function OriginalTextEditor({
   page,
@@ -29,6 +30,9 @@ export function OriginalTextEditor({
   onMove,
   onApply,
   onClose,
+  children,
+  drafts,
+  setDrafts,
 }: {
   page: EditorPage;
   boxes: TextBox[];
@@ -45,8 +49,10 @@ export function OriginalTextEditor({
   onMove: (ids: string[], dx: number, dy: number) => void;
   onApply: (edits: TextReplacement[]) => void;
   onClose: () => void;
+  children?: ReactNode;
+  drafts: Record<string, string>;
+  setDrafts: Dispatch<SetStateAction<Record<string, string>>>;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [draftError, setDraftError] = useState("");
   const values = useMemo(() => {
     const replacements = new Map(
@@ -65,19 +71,22 @@ export function OriginalTextEditor({
   }, [boxes, page.textReplacements]);
   const previousValues = useRef(values);
   useEffect(() => {
+    if (loading) return;
     const previous = previousValues.current;
     previousValues.current = values;
     setDrafts((current) => {
       const next = Object.fromEntries(
         Object.entries(current).filter(
-          ([id]) => values.has(id) && previous.get(id) === values.get(id),
+          ([id]) =>
+            values.has(id) &&
+            (!previous.has(id) || previous.get(id) === values.get(id)),
         ),
       );
       return Object.keys(next).length === Object.keys(current).length
         ? current
         : next;
     });
-  }, [values]);
+  }, [values, loading]);
   const pending = boxes
     .flatMap((box) => box.runs)
     .filter(
@@ -213,6 +222,7 @@ export function OriginalTextEditor({
             need further support.
           </p>
         )}
+        {children}
         {boxes.map((box, index) => {
           const current = (runId: string, original: string) =>
             values.get(runId) ?? original;

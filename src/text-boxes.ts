@@ -2,6 +2,7 @@ import type { EditorPage } from "./pdf";
 import type { EditableRun, TextOffset } from "./text-edit";
 import type { Point } from "./geometry";
 import { Encodings, Font, FontNames } from "@pdf-lib/standard-fonts";
+import { textWidth } from "./typography";
 
 export interface TextGroup {
   id: string;
@@ -94,24 +95,27 @@ export function getAllTextRuns(
 ): EditableRun[] {
   const added: EditableRun[] = page.annotations.flatMap((annotation) => {
     if (annotation.kind !== "text") return [];
-    const width = Array.from(annotation.text).reduce((total, character) => {
-      const code = character.codePointAt(0)!;
-      return (
-        total +
-        ((Encodings.WinAnsi.canEncodeUnicodeCodePoint(code)
-          ? (metrics.getWidthOfGlyph(
-              Encodings.WinAnsi.encodeUnicodeCodePoint(code).name,
-            ) ?? 500)
-          : 500) *
-          annotation.size) /
-          1000
-      );
-    }, 0);
+    const width = annotation.font
+      ? textWidth(annotation.text, annotation.font, annotation.size)
+      : Array.from(annotation.text).reduce((total, character) => {
+          const code = character.codePointAt(0)!;
+          return (
+            total +
+            ((Encodings.WinAnsi.canEncodeUnicodeCodePoint(code)
+              ? (metrics.getWidthOfGlyph(
+                  Encodings.WinAnsi.encodeUnicodeCodePoint(code).name,
+                ) ?? 500)
+              : 500) *
+              annotation.size) /
+              1000
+          );
+        }, 0);
     return [
       {
         id: `added:${annotation.id}`,
         text: annotation.text,
-        font: "Helvetica",
+        font: annotation.font ?? "Helvetica",
+        fontSize: annotation.size,
         characters: annotationCharacters,
         geometry: {
           baseline: { x: annotation.x, y: annotation.y },
@@ -236,6 +240,7 @@ export function joinTextBoxes(
       ...normalized.filter((group) => !selected.includes(group.id)),
       { id, runIds: [...new Set(ordered)] },
     ],
+    paragraphs: page.paragraphs?.filter((p) => !selected.includes(p.groupId)),
   };
 }
 
@@ -248,6 +253,7 @@ export function ungroupTextBoxes(
     textGroups: (page.textGroups ?? []).filter(
       (group) => !selected.includes(group.id),
     ),
+    paragraphs: page.paragraphs?.filter((p) => !selected.includes(p.groupId)),
   };
 }
 
@@ -304,6 +310,9 @@ export function moveTextBoxes(
   return {
     ...page,
     textOffsets: [...offsets.values()],
+    paragraphs: page.paragraphs?.map((p) =>
+      selected.includes(p.groupId) ? { ...p, x: p.x + dx, y: p.y + dy } : p,
+    ),
     annotations: page.annotations.map((annotation) => {
       if (annotation.kind !== "text" || !addedIds.has(annotation.id))
         return annotation;

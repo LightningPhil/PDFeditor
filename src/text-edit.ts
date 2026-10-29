@@ -23,6 +23,7 @@ export interface EditableRun {
   text: string;
   font: string;
   characters: string;
+  fontSize?: number;
   geometry?: { quad: Point[]; baseline: Point };
 }
 export interface TextOffset {
@@ -736,6 +737,7 @@ export function inspectPageText(
     text: run.text,
     font: run.font,
     characters: run.characters,
+    fontSize: Math.abs(run.size),
     geometry: runGeometry(run, values.get(run.id)),
   }));
 }

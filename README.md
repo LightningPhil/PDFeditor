@@ -15,17 +15,74 @@ npm run dev
 Open the localhost URL printed by Vite. `npm run build` checks TypeScript and
 creates the production bundle. `npm test` runs the PDF export regression tests.
 
-## First milestone
+## Workspace features
 
 - Open or drop one or more PDFs. Subsequent imports insert after the selected page.
-- Select, reorder, or remove pages, with undo and redo.
+- Organise real page thumbnails: select several, drag with their grips, rotate,
+  duplicate, extract, remove, or merge PDFs, with undo and redo.
 - Preview pages and add text or outline rectangles in a chosen colour.
 - Inspect extracted page text in a read-only panel.
 - Edit supported original text runs using the original font, colour and position.
 - Export a new PDF with original page content and new annotations.
+- Recover source PDFs, undo history, text and paragraph drafts, selection and zoom
+  from local IndexedDB storage after a refresh. Each tab has its own workspace.
+- Explicitly reflow selected text into a wrapping paragraph with font, size,
+  colour, width, line spacing and left/centre/right alignment controls.
+- Snap moving text to alignment guides, align/distribute selected boxes, and set
+  exact PDF coordinates.
+- Find and replace across pages and fragmented native text, with match-case and
+  whole-word options, navigation and a replacement preview.
+- Toggle Original/Edited, highlight additions/edits/deletions, and review changes
+  to page order, rotation, text, grouping and annotations before export.
 
-Edits live in memory: export before closing or refreshing the tab. Export does
-not change the originals. Imported sources remain in memory to support undo.
+The save indicator confirms when local recovery has completed. Export creates
+a shareable PDF and does not change source files. Clearing browser site data
+removes recovery copies. New workspace saves the current session before starting
+fresh; the recovery banner can restore or delete the previous local copy.
+
+## Paragraphs and formatting
+
+Select text in **Edit text**, open **Paragraph & font formatting**, edit the text
+and settings, then choose **Apply paragraph reflow**. This removes the selected
+native text commands and writes new native text lines; it never paints over them.
+Joining alone still preserves every original position. Reflow is an explicit
+change to layout, using the chosen replacement font; it creates horizontal lines
+in the page's PDF coordinate system. Long words wrap by measured glyph advances;
+explicit line breaks and blank lines are retained.
+
+Twelve Helvetica, Times and Courier faces cover regular, bold and italic Latin
+text. Original embedded fonts remain available for supported direct text edits.
+Missing glyphs are reported before applying formatting or replacement. Paragraph
+settings and joined membership survive PDF export and reopening in PDFeditor.
+Editing an individual piece or using find/replace preserves its current positions
+and removes the old paragraph recipe; selecting the group can infer a fresh one.
+
+**Position & alignment** uses PDF points from the page's lower-left corner.
+Two boxes can align to edges, centres or baselines; three can distribute gaps.
+Snap can be disabled for free placement. Annotations and previews now use native
+page coordinate conversion on rotated and cropped pages.
+
+## Search, review and recovery
+
+**Find & replace** searches editable text across PDF drawing fragments. Other
+extractable text appears as read-only results. Scans need OCR. Replacement previews
+show matches and the proposed text before applying; unsupported glyphs stop the
+operation rather than partially modifying the document. Replacement does not
+automatically reflow neighbours. Ctrl/Cmd+F opens search. Escape closes dialogs;
+their keyboard focus stays inside them. Ctrl/Cmd+Z and Shift+Ctrl/Cmd+Z undo/redo
+document changes when focus is outside text inputs.
+
+**Original** shows the imported source page read-only. **Edited** restores the
+working view. Highlights mark current text and shapes in amber and deleted native
+text in red; they are review aids and are never exported. Review changes lists
+page and content changes against the imported workspace baseline.
+
+Recovery is debounced by 500 ms and stored transactionally with original source
+bytes and up to 40 undo states plus 10 redo states around the current version.
+Unapplied native-text and paragraph drafts are included. New tabs offer the most
+recent recovery copy without sharing its write identity. Storage/quota failures
+appear in the save indicator; export remains available. Browser storage is local
+to this origin and browser profile, not a backup on another device.
 
 ## Existing-text editing
 
@@ -143,13 +200,12 @@ mixed fonts, colours, opacity, skew and pre-existing edits across repeated expor
 
 ## Current limits
 
-This is a foundation, not a finished editor. Text annotations use Helvetica and
-support basic Latin characters; unsupported characters cause an explicit export
-error. Annotations are disabled for rotated pages, non-zero crop origins, and
-custom user units until coordinate handling is expanded. Shapes are rectangles
-only. Annotation selection/movement, thumbnails, autosave, password entry, OCR,
-and broader text replacement are future work. Password-protected PDFs may fail to
-open. Page export is intended for ordinary static PDFs: document-level features
+Replacement fonts support WinAnsi Latin characters; custom font-file embedding
+and broader Unicode shaping are not implemented. Original-font edits use the
+glyphs available in the PDF. Shapes are rectangles only; rectangle selection and
+resizing, password entry and interactive OCR remain future work.
+Password-protected PDFs may fail to open. Page export is intended for ordinary
+static PDFs: document-level features
 such as bookmarks, signatures, forms, and tagged structure are not guaranteed
 to survive page copying. Signed originals should be retained.
 

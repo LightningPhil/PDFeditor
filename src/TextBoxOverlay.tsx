@@ -9,6 +9,8 @@ import {
 } from "./text-selection";
 import type { Rectangle } from "./text-selection";
 import type { PointerEvent } from "react";
+import { snapTextMove } from "./text-alignment";
+import type { MoveGuide } from "./text-alignment";
 
 type Gesture =
   | {
@@ -30,6 +32,7 @@ export function TextBoxOverlay({
   onSelect,
   onSelection,
   onMove,
+  snapEnabled,
 }: {
   disabled: boolean;
   positionReady: boolean;
@@ -41,12 +44,20 @@ export function TextBoxOverlay({
   onSelect: (id: string | null, extend?: boolean) => void;
   onSelection: (ids: string[]) => void;
   onMove: (ids: string[], dx: number, dy: number) => void;
+  snapEnabled: boolean;
 }) {
   const svg = useRef<SVGSVGElement>(null),
     gesture = useRef<Gesture | null>(null);
   const selectedIds = useMemo(() => new Set(selected), [selected]);
   const [delta, setDelta] = useState<Point>({ x: 0, y: 0 }),
     [marquee, setMarquee] = useState<Rectangle | null>(null);
+  const [guides, setGuides] = useState<MoveGuide[]>([]);
+  function snapped(ids: string[], dx: number, dy: number) {
+    const native = inverseVector(viewport, { x: dx, y: dy });
+    return snapEnabled
+      ? snapTextMove(boxes, ids, native.x, native.y)
+      : { ...native, dx: native.x, dy: native.y, guides: [] };
+  }
   function point(event: PointerEvent) {
     const rect = svg.current!.getBoundingClientRect();
     return {
@@ -59,6 +70,7 @@ export function TextBoxOverlay({
     gesture.current = null;
     setDelta({ x: 0, y: 0 });
     setMarquee(null);
+    setGuides([]);
     if (current && svg.current?.hasPointerCapture(current.pointerId))
       svg.current.releasePointerCapture(current.pointerId);
   }
@@ -80,15 +92,17 @@ export function TextBoxOverlay({
     gesture.current = null;
     setDelta({ x: 0, y: 0 });
     setMarquee(null);
+    setGuides([]);
     if (svg.current?.hasPointerCapture(event.pointerId))
       svg.current.releasePointerCapture(event.pointerId);
     if (current.kind === "move") {
       if (Math.hypot(end.x - current.start.x, end.y - current.start.y) > 1) {
-        const native = inverseVector(viewport, {
-          x: end.x - current.start.x,
-          y: end.y - current.start.y,
-        });
-        onMove(current.ids, native.x, native.y);
+        const native = snapped(
+          current.ids,
+          end.x - current.start.x,
+          end.y - current.start.y,
+        );
+        onMove(current.ids, native.dx, native.dy);
       }
     } else {
       const hits = boxesInRectangle(
@@ -126,9 +140,18 @@ export function TextBoxOverlay({
         const current = gesture.current;
         if (!current || current.pointerId !== event.pointerId) return;
         const end = point(event);
-        if (current.kind === "move")
-          setDelta({ x: end.x - current.start.x, y: end.y - current.start.y });
-        else setMarquee(rectangle(current.start, end));
+        if (current.kind === "move") {
+          const next = snapped(
+            current.ids,
+            end.x - current.start.x,
+            end.y - current.start.y,
+          );
+          setDelta({
+            x: viewport[0] * next.dx + viewport[2] * next.dy,
+            y: viewport[1] * next.dx + viewport[3] * next.dy,
+          });
+          setGuides(next.guides);
+        } else setMarquee(rectangle(current.start, end));
       }}
       onPointerUp={finish}
       onPointerCancel={cancel}
@@ -249,6 +272,23 @@ export function TextBoxOverlay({
           height={marquee.height}
         />
       )}
+      <g className="alignment-guides">
+        {guides.map((guide, index) => {
+          const a = transform(
+              viewport,
+              guide.axis === "x"
+                ? { x: guide.value, y: -100000 }
+                : { x: -100000, y: guide.value },
+            ),
+            b = transform(
+              viewport,
+              guide.axis === "x"
+                ? { x: guide.value, y: 100000 }
+                : { x: 100000, y: guide.value },
+            );
+          return <line key={index} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />;
+        })}
+      </g>
     </svg>
   );
 }

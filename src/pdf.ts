@@ -1,4 +1,13 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  degrees,
+  PDFName,
+  PDFHexString,
+} from "pdf-lib";
+import type { Paragraph, TextFont } from "./typography";
+import { validateParagraph } from "./typography";
 import { replacePageText, inspectPageText } from "./text-edit";
 import { storePageTextGroups } from "./text-group-storage";
 import type { TextReplacement, TextOffset } from "./text-edit";
@@ -6,7 +15,7 @@ import type { TextGroup } from "./text-boxes";
 import { assertTextGroups } from "./text-boxes";
 
 export type Annotation = { id: string; color: string; x: number; y: number } & (
-  | { kind: "text"; text: string; size: number }
+  | { kind: "text"; text: string; size: number; font?: TextFont }
   | { kind: "rectangle"; width: number; height: number }
 );
 export interface Source {
@@ -22,11 +31,27 @@ export interface EditorPage {
   textReplacements?: TextReplacement[];
   textOffsets?: TextOffset[];
   textGroups?: TextGroup[];
+  rotation?: number;
+  paragraphs?: Paragraph[];
 }
 
 /** Annotations render in a separate SVG layer; grouping never affects pixels. */
-export function exportPagePreview(source: Source, page: EditorPage) {
-  return exportPdf([source], [{ ...page, annotations: [], textGroups: [] }]);
+export function exportPagePreview(
+  source: Source,
+  page: EditorPage,
+  includeAnnotations = false,
+) {
+  return exportPdf(
+    [source],
+    [
+      {
+        ...page,
+        annotations: includeAnnotations ? page.annotations : [],
+        textGroups: [],
+        paragraphs: [],
+      },
+    ],
+  );
 }
 
 /** Copy pages without rasterising their original text or graphics. */
@@ -35,6 +60,7 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
   const output = await PDFDocument.create();
   const loaded = new Map<string, PDFDocument>();
   const font = await output.embedFont(StandardFonts.Helvetica);
+  const fonts = new Map<string, typeof font>([["Helvetica", font]]);
   const grouped: {
     page: ReturnType<PDFDocument["getPage"]>;
     item: EditorPage;
@@ -51,6 +77,15 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
     }
     const [page] = await output.copyPages(original, [item.index]);
     output.addPage(page);
+    if (item.rotation) {
+      if (!Number.isInteger(item.rotation / 90))
+        throw new Error("Page rotation must be a multiple of 90 degrees.");
+      page.setRotation(
+        degrees(
+          (((page.getRotation().angle + item.rotation) % 360) + 360) % 360,
+        ),
+      );
+    }
     const sourceRuns = item.textGroups?.length ? inspectPageText(page) : [];
     const validGroups = assertTextGroups(item.textGroups ?? [], [
       ...sourceRuns.map((run) => run.id),
@@ -80,14 +115,20 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
         parseInt(hex.slice(4, 6), 16) / 255,
       );
       if (annotation.kind === "text") {
+        const fontName = annotation.font ?? "Helvetica";
+        let annotationFont = fonts.get(fontName);
+        if (!annotationFont) {
+          annotationFont = await output.embedFont(fontName as StandardFonts);
+          fonts.set(fontName, annotationFont);
+        }
         if (item.textGroups?.length && annotation.text.trim())
           expected.push({
             id: `added:${annotation.id}`,
             text: annotation.text,
-            font: "Helvetica",
+            font: fontName,
           });
         try {
-          font.encodeText(annotation.text);
+          annotationFont.encodeText(annotation.text);
         } catch {
           throw new Error(
             "An annotation contains unsupported characters. This first version supports basic Latin text. Undo that annotation before exporting.",
@@ -97,7 +138,7 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           x: annotation.x,
           y: annotation.y,
           size: annotation.size,
-          font,
+          font: annotationFont,
           color,
         });
       } else
@@ -116,6 +157,22 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
         item: { ...item, textGroups: validGroups },
         expected,
       });
+    page.node.delete(PDFName.of("PDFeditorParagraphs"));
+    const paragraphs = (item.paragraphs ?? []).filter((p) =>
+      validGroups.some((g) => g.id === p.groupId),
+    );
+    if (paragraphs.length) {
+      paragraphs.forEach(validateParagraph);
+      const json = JSON.stringify({ version: 1, paragraphs });
+      if (json.length > 900000 || paragraphs.length > 1000)
+        throw new Error(
+          "Too much paragraph data on this page. Split the document before exporting.",
+        );
+      page.node.set(
+        PDFName.of("PDFeditorParagraphs"),
+        PDFHexString.fromText(json),
+      );
+    }
   }
   if (grouped.length) {
     await output.flush();

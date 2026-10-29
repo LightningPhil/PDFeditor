@@ -43,6 +43,20 @@ import {
   textMembersForBoxes,
 } from "./text-selection";
 import "./App.css";
+import { TextFormatting } from "./TextFormatting";
+import { SearchPanel } from "./SearchPanel";
+import { PageOrganizer } from "./PageOrganizer";
+import { ReviewPanel } from "./ReviewPanel";
+import { applyTextEdits, readDocumentParagraphs } from "./document-editing";
+import {
+  saveSession,
+  loadSession,
+  latestSession,
+  forgetSession,
+} from "./session-store";
+import type { SessionSnapshot } from "./session-store";
+import type { Paragraph } from "./typography";
+import type { Point } from "./geometry";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 type Tool = "select" | "text" | "rectangle" | "inspect" | "edit";
@@ -52,6 +66,31 @@ type LoadedSource = Source & {
 };
 const uid = () => crypto.randomUUID();
 const emptyRuns: EditableRun[] = [];
+async function restoreSources(saved: Source[]): Promise<LoadedSource[]> {
+  const loaded: LoadedSource[] = [];
+  try {
+    for (const source of saved) {
+      const task = getDocument({
+        data: source.bytes.slice(),
+        standardFontDataUrl: "/pdfjs/standard_fonts/",
+        cMapUrl: "/pdfjs/cmaps/",
+        cMapPacked: true,
+        wasmUrl: "/pdfjs/wasm/",
+      });
+      try {
+        const document = await task.promise;
+        loaded.push({ ...source, document, task });
+      } catch (e) {
+        void task.destroy();
+        throw e;
+      }
+    }
+    return loaded;
+  } catch (e) {
+    loaded.forEach((s) => void s.task.destroy());
+    throw e;
+  }
+}
 
 function PageView({
   source,
@@ -68,6 +107,9 @@ function PageView({
   onSelection,
   onMoveText,
   onViewport,
+  snapEnabled,
+  highlight,
+  deletedQuads,
 }: {
   source: LoadedSource;
   page: EditorPage;
@@ -82,14 +124,17 @@ function PageView({
   onSelect: (id: string | null, extend?: boolean) => void;
   onSelection: (ids: string[]) => void;
   onMoveText: (ids: string[], dx: number, dy: number) => void;
-  onViewport: (matrix: Matrix, pageId: string) => void;
+  onViewport: (matrix: Matrix, pageId: string, rotation: number) => void;
+  snapEnabled: boolean;
+  highlight: boolean;
+  deletedQuads: Point[][];
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
   const [ready, setReady] = useState(false);
-  const [supported, setSupported] = useState(false);
   const [viewport, setViewport] = useState<Matrix>(identity);
   const [positionReady, setPositionReady] = useState(false);
+  const [positionRotation, setPositionRotation] = useState<number>();
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -99,9 +144,14 @@ function PageView({
       | undefined;
     setReady(false);
     void (async () => {
-      if (!page.textReplacements?.length && !page.textOffsets?.length)
+      if (
+        !page.textReplacements?.length &&
+        !page.textOffsets?.length &&
+        !page.annotations.length &&
+        !page.rotation
+      )
         return source.document.getPage(page.index + 1);
-      const data = await exportPagePreview(source, page);
+      const data = await exportPagePreview(source, page, true);
       if (cancelled) return null;
       previewTask = getDocument({
         data,
@@ -117,16 +167,10 @@ function PageView({
         if (cancelled || !canvas.current || !pdfPage) return;
         const view = pdfPage.getViewport({ scale: 1 });
         setViewport(view.transform as Matrix);
-        onViewport(view.transform as Matrix, page.id);
+        onViewport(view.transform as Matrix, page.id, page.rotation ?? 0);
+        setPositionRotation(page.rotation ?? 0);
         setPositionReady(true);
         setSize({ width: view.width, height: view.height });
-        // Non-zero crop origins and rotated pages need explicit coordinate conversion.
-        setSupported(
-          pdfPage.rotate === 0 &&
-            pdfPage.view[0] === 0 &&
-            pdfPage.view[1] === 0 &&
-            pdfPage.userUnit === 1,
-        );
         const scale = Math.min(window.devicePixelRatio || 1, 2) * 1.4;
         const target = canvas.current;
         const renderView = pdfPage.getViewport({ scale });
@@ -150,16 +194,22 @@ function PageView({
     page.index,
     page.textReplacements,
     page.textOffsets,
+    page.annotations,
+    page.rotation,
     onError,
     onViewport,
   ]);
 
   function point(event: PointerEvent<SVGSVGElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
-    return {
+    const position = {
       x: ((event.clientX - bounds.left) / bounds.width) * size.width,
       y: ((event.clientY - bounds.top) / bounds.height) * size.height,
     };
+    return inverseVector(viewport, {
+      x: position.x - viewport[4],
+      y: position.y - viewport[5],
+    });
   }
   async function inspect() {
     try {
@@ -193,14 +243,14 @@ function PageView({
             return;
           }
           if (tool === "edit") onSelect(null);
-          if (!supported || tool === "select" || tool === "edit") return;
+          if (tool === "select" || tool === "edit") return;
           const p = point(event);
           if (tool === "text" && text.trim())
             onAdd({
               id: uid(),
               kind: "text",
               x: p.x,
-              y: size.height - p.y,
+              y: p.y,
               text,
               color,
               size: 16,
@@ -219,47 +269,72 @@ function PageView({
               id: uid(),
               kind: "rectangle",
               x: Math.min(start.x, end.x),
-              y: size.height - Math.max(start.y, end.y),
+              y: Math.min(start.y, end.y),
               width: Math.abs(end.x - start.x),
               height: Math.abs(end.y - start.y),
               color,
             });
           setStart(null);
         }}
-      >
-        {page.annotations.map((a) =>
-          a.kind === "text" ? (
-            <text
-              key={a.id}
-              x={a.x}
-              y={size.height - a.y}
-              fill={a.color}
-              fontSize={a.size}
-              fontFamily="Helvetica, Arial, sans-serif"
-            >
-              {a.text}
-            </text>
-          ) : (
-            <rect
-              key={a.id}
-              x={a.x}
-              y={size.height - a.y - a.height}
-              width={a.width}
-              height={a.height}
-              stroke={a.color}
-              strokeWidth="2"
-              fill="none"
-            />
-          ),
-        )}
-      </svg>
+      ></svg>
+      {highlight && (
+        <svg
+          className="change-layer"
+          viewBox={`0 0 ${size.width} ${size.height}`}
+          aria-label="Highlighted changes"
+        >
+          <g transform={`matrix(${viewport.join(" ")})`}>
+            {deletedQuads.map((quad, index) => (
+              <polygon
+                key={`deleted:${index}`}
+                className="deleted-highlight"
+                points={quad.map((p) => `${p.x},${p.y}`).join(" ")}
+              />
+            ))}
+            {page.annotations
+              .filter((a) => a.kind === "rectangle")
+              .map((a) =>
+                a.kind === "rectangle" ? (
+                  <rect
+                    key={a.id}
+                    className="shape-highlight"
+                    x={a.x}
+                    y={a.y}
+                    width={a.width}
+                    height={a.height}
+                  />
+                ) : null,
+              )}
+            {boxes.flatMap((box) =>
+              box.pieces
+                .filter(
+                  (piece) =>
+                    piece.runId.startsWith("added:") ||
+                    page.textReplacements?.some(
+                      (e) => e.runId === piece.runId,
+                    ) ||
+                    page.textOffsets?.some((e) => e.runId === piece.runId),
+                )
+                .map((piece) => (
+                  <polygon
+                    key={piece.runId}
+                    points={piece.quad.map((p) => `${p.x},${p.y}`).join(" ")}
+                  />
+                )),
+            )}
+          </g>
+        </svg>
+      )}
       {tool === "edit" && (
         <TextBoxOverlay
           disabled={!ready}
-          positionReady={positionReady}
+          positionReady={
+            positionReady && positionRotation === (page.rotation ?? 0)
+          }
           boxes={boxes}
           selected={selected}
           viewport={viewport}
+          snapEnabled={snapEnabled}
           width={size.width}
           height={size.height}
           onSelect={onSelect}
@@ -267,14 +342,6 @@ function PageView({
           onMove={onMoveText}
         />
       )}
-      {!supported &&
-        tool !== "select" &&
-        tool !== "inspect" &&
-        tool !== "edit" && (
-          <div className="page-notice">
-            Annotations on rotated or cropped pages are coming next.
-          </div>
-        )}
     </div>
   );
 }
@@ -291,9 +358,156 @@ export default function App() {
   const [error, setError] = useState("");
   const [inspection, setInspection] = useState<string | null>(null);
   const [zoom, setZoom] = useState(85);
+  const [selection, setSelection] = useState<{
+    pageId: string;
+    runIds: string[];
+  }>({ pageId: "", runIds: [] });
+  const [formatDrafts, setFormatDrafts] = useState<Record<string, Paragraph>>(
+    {},
+  );
+  const [baseline, setBaseline] = useState<EditorPage[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>(
+    {},
+  );
+  const [dialog, setDialog] = useState<"search" | "pages" | "review" | null>(
+    null,
+  );
+  const [showOriginal, setShowOriginal] = useState(false),
+    [highlight, setHighlight] = useState(false),
+    [snapEnabled, setSnapEnabled] = useState(true);
+  const [hydrated, setHydrated] = useState(false),
+    [saveStatus, setSaveStatus] = useState("Opening local workspace…");
+  const [recovery, setRecovery] = useState<SessionSnapshot | null>(null);
+  const [sessionId, setSessionId] = useState(() => {
+    try {
+      let id = sessionStorage.getItem("PDFeditor-session");
+      if (!id) {
+        id = uid();
+        sessionStorage.setItem("PDFeditor-session", id);
+      }
+      return id;
+    } catch {
+      return uid();
+    }
+  });
   const input = useRef<HTMLInputElement>(null);
   const busyRef = useRef(false);
   const tasks = useRef<PDFDocumentLoadingTask[]>([]);
+  function applyRecovered(snapshot: SessionSnapshot, loaded: LoadedSource[]) {
+    if (
+      snapshot.version !== 1 ||
+      !Array.isArray(snapshot.history) ||
+      !snapshot.history[snapshot.cursor]
+    )
+      throw new Error("This saved workspace cannot be restored.");
+    tasks.current.push(...loaded.map((s) => s.task));
+    setSources(loaded);
+    setHistory(snapshot.history);
+    setCursor(snapshot.cursor);
+    setActiveId(snapshot.activeId);
+    setBaseline(snapshot.baseline ?? []);
+    setDrafts(snapshot.drafts ?? {});
+    setZoom(snapshot.zoom ?? 85);
+    setSelection(snapshot.selection ?? { pageId: "", runIds: [] });
+    setFormatDrafts(snapshot.formatDrafts ?? {});
+    if (
+      ["select", "edit", "text", "rectangle", "inspect"].includes(
+        snapshot.tool ?? "",
+      )
+    )
+      setTool(snapshot.tool as Tool);
+    setRecovery(null);
+    setSaveStatus("Recovered local workspace");
+  }
+  useEffect(() => {
+    let cancelled = false;
+    busyRef.current = true;
+    setBusy(true);
+    void (async () => {
+      const saved = await loadSession(sessionId);
+      if (saved) {
+        const loaded = await restoreSources(saved.sources);
+        if (cancelled) {
+          loaded.forEach((s) => void s.task.destroy());
+          return;
+        }
+        applyRecovered(saved, loaded);
+      } else {
+        const candidate = await latestSession();
+        if (!cancelled) {
+          setRecovery(candidate ?? null);
+          setSaveStatus("Ready to save locally");
+        }
+      }
+    })()
+      .catch((e) => {
+        if (!cancelled) {
+          setSaveStatus("Local recovery unavailable");
+          setError(String(e));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHydrated(true);
+          setBusy(false);
+          busyRef.current = false;
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+  useEffect(() => {
+    if (!hydrated || busy || !sources.length) return;
+    setSaveStatus("Saving locally…");
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const start = Math.max(0, cursor - 40);
+      const snapshot: SessionSnapshot = {
+        version: 1,
+        id: sessionId,
+        updatedAt: Date.now(),
+        sources: sources.map(({ id, name, bytes }) => ({ id, name, bytes })),
+        history: history.slice(start, cursor + 11),
+        cursor: cursor - start,
+        activeId,
+        baseline,
+        drafts,
+        zoom,
+        selection,
+        formatDrafts,
+        tool,
+      };
+      void saveSession(snapshot)
+        .then(() => {
+          if (!cancelled)
+            setSaveStatus(
+              `Saved locally · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+            );
+        })
+        .catch(() => {
+          if (!cancelled) setSaveStatus("Local save failed — export your PDF");
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    hydrated,
+    busy,
+    sources,
+    history,
+    cursor,
+    activeId,
+    baseline,
+    drafts,
+    zoom,
+    sessionId,
+    selection,
+    formatDrafts,
+    tool,
+  ]);
   useEffect(
     () => () => {
       tasks.current.forEach((task) => {
@@ -304,28 +518,111 @@ export default function App() {
   );
   const pages = history[cursor];
   const active = pages.find((page) => page.id === activeId) ?? pages[0];
+  const displayPage = useMemo(
+    () =>
+      active && showOriginal
+        ? {
+            ...active,
+            annotations: [],
+            textReplacements: [],
+            textOffsets: [],
+            textGroups: [],
+            paragraphs: [],
+            rotation: 0,
+          }
+        : active,
+    [active, showOriginal],
+  );
   const source = sources.find((item) => item.id === active?.sourceId);
   const activeIndex = pages.findIndex((page) => page.id === active?.id);
+  useEffect(() => {
+    if (!dialog) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const modal = document.querySelector<HTMLElement>('[role="dialog"]');
+    const focusable = () =>
+      Array.from(
+        modal?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+        ) ?? [],
+      ).filter((el) => el.offsetParent !== null);
+    focusable()[0]?.focus();
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDialog(null);
+      }
+      if (event.key === "Tab") {
+        const items = focusable(),
+          first = items[0],
+          last = items.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("keydown", key);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [dialog]);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      const input =
+        event.target instanceof HTMLElement &&
+        (event.target.matches("input, textarea, select") ||
+          event.target.isContentEditable);
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "f" &&
+        pages.length
+      ) {
+        event.preventDefault();
+        setDialog("search");
+      }
+      if (
+        !input &&
+        !dialog &&
+        !busy &&
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "z"
+      ) {
+        event.preventDefault();
+        setCursor((current) =>
+          Math.max(
+            0,
+            Math.min(history.length - 1, current + (event.shiftKey ? 1 : -1)),
+          ),
+        );
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [pages.length, dialog, busy, history.length]);
   const [pageViewport, setPageViewport] = useState<{
     pageId: string;
     matrix: Matrix;
-  }>({ pageId: "", matrix: identity() });
+    rotation: number;
+  }>({ pageId: "", matrix: identity(), rotation: 0 });
   const publishViewport = useCallback(
-    (matrix: Matrix, pageId: string) => setPageViewport({ matrix, pageId }),
+    (matrix: Matrix, pageId: string, rotation: number) =>
+      setPageViewport({ matrix, pageId, rotation }),
     [],
   );
   const [runState, setRunState] = useState<{
     pageId: string;
     runs: EditableRun[];
-  }>({ pageId: "", runs: [] });
+    original: EditableRun[];
+  }>({ pageId: "", runs: [], original: [] });
   const [readingText, setReadingText] = useState(false);
-  const [selection, setSelection] = useState<{
-    pageId: string;
-    runIds: string[];
-  }>({ pageId: "", runIds: [] });
   const runs = runState.pageId === active?.id ? runState.runs : emptyRuns;
   const boxes = useMemo(
-    () => (active ? getTextBoxes(active, runs) : []),
+    () =>
+      active ? getTextBoxes(active, runs).filter((box) => box.text.trim()) : [],
     [active, runs],
   );
   const selected = useMemo(
@@ -339,13 +636,12 @@ export default function App() {
     if (!active || !source) return;
     let cancelled = false;
     setReadingText(true);
-    void inspectEditableText(
-      source.bytes,
-      active.index,
-      active.textReplacements,
-    )
-      .then((runs) => {
-        if (!cancelled) setRunState({ pageId: active.id, runs });
+    void Promise.all([
+      inspectEditableText(source.bytes, active.index, active.textReplacements),
+      inspectEditableText(source.bytes, active.index),
+    ])
+      .then(([runs, original]) => {
+        if (!cancelled) setRunState({ pageId: active.id, runs, original });
       })
       .catch((cause) => {
         if (!cancelled) setError(String(cause));
@@ -418,17 +714,61 @@ export default function App() {
   }
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (pages.length) event.preventDefault();
+      if (pages.length && !saveStatus.startsWith("Saved locally"))
+        event.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [pages.length]);
+  }, [pages.length, saveStatus]);
   function commit(next: EditorPage[]) {
     setHistory((previous) => [...previous.slice(0, cursor + 1), next]);
     setCursor(cursor + 1);
   }
+  async function newWorkspace() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await saveSession({
+        version: 1,
+        id: sessionId,
+        updatedAt: Date.now(),
+        sources: sources.map(({ id, name, bytes }) => ({ id, name, bytes })),
+        history: history.slice(Math.max(0, cursor - 40), cursor + 11),
+        cursor: Math.min(cursor, 40),
+        activeId,
+        baseline,
+        drafts,
+        zoom,
+        selection,
+        formatDrafts,
+        tool,
+      });
+      const id = uid();
+      sessionStorage.setItem("PDFeditor-session", id);
+      tasks.current.forEach((task) => void task.destroy());
+      tasks.current = [];
+      setSources([]);
+      setHistory([[]]);
+      setCursor(0);
+      setActiveId("");
+      setBaseline([]);
+      setDrafts({});
+      setFormatDrafts({});
+      setSelection({ pageId: "", runIds: [] });
+      setTool("select");
+      setShowOriginal(false);
+      setDialog(null);
+      setHydrated(false);
+      setSessionId(id);
+    } catch (e) {
+      setError(String(e));
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
   async function importFiles(files: File[]) {
-    if (!files.length || busyRef.current) return;
+    if (!files.length || busyRef.current || !hydrated) return;
     busyRef.current = true;
     setBusy(true);
     setError("");
@@ -449,6 +789,7 @@ export default function App() {
         tasks.current.push(task);
         const document = await task.promise;
         const groups = await readDocumentTextGroups(bytes);
+        const paragraphs = await readDocumentParagraphs(bytes, groups);
         const item = { id: uid(), name: file.name, bytes, document, task };
         loaded.push(item);
         for (let index = 0; index < document.numPages; index++)
@@ -458,10 +799,14 @@ export default function App() {
             index,
             annotations: [],
             textGroups: groups[index] ?? [],
+            paragraphs: paragraphs[index] ?? [],
           });
       }
       if (!added.length) throw new Error("This PDF has no pages.");
       setSources((previous) => [...previous, ...loaded]);
+      setBaseline((previous) => [...previous, ...added]);
+      setRecovery(null);
+      setShowOriginal(false);
       const insertion = active ? activeIndex + 1 : pages.length;
       commit([
         ...pages.slice(0, insertion),
@@ -492,13 +837,13 @@ export default function App() {
     ];
     commit(next);
   }
-  async function download() {
+  async function download(chosen: EditorPage[] = pages, filename?: string) {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
     setError("");
     try {
-      const bytes = await exportPdf(sources, pages);
+      const bytes = await exportPdf(sources, chosen);
       const url = URL.createObjectURL(
         new Blob([bytes as Uint8Array<ArrayBuffer>], {
           type: "application/pdf",
@@ -506,7 +851,9 @@ export default function App() {
       );
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${sources[0]?.name.replace(/\.pdf$/i, "") || "document"}-edited.pdf`;
+      anchor.download =
+        filename ??
+        `${sources[0]?.name.replace(/\.pdf$/i, "") || "document"}-edited.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (cause) {
@@ -562,14 +909,19 @@ export default function App() {
         >
           <Download size={16} /> Export PDF
         </button>
+        {!!pages.length && (
+          <button disabled={busy} onClick={() => void newWorkspace()}>
+            New workspace
+          </button>
+        )}
       </header>
       <div className="workspace-bar">
         <div>
           <span className="status-dot" />{" "}
           {sources[0]?.name ?? "Your next great edit"}
-          <span className="muted">
+          <span className="muted" role="status" aria-live="polite">
             {pages.length
-              ? `${pages.length} pages · Browser session`
+              ? `${pages.length} pages · ${saveStatus}`
               : "A little less friction. A lot more freedom."}
           </span>
         </div>
@@ -590,6 +942,44 @@ export default function App() {
           </button>
         </div>
       </div>
+      {!pages.length && recovery && (
+        <div className="recovery-banner">
+          <div>
+            <strong>Recover your previous workspace</strong>
+            <p>
+              {recovery.sources[0]?.name} ·{" "}
+              {new Date(recovery.updatedAt).toLocaleString()} · saved on this
+              device
+            </p>
+          </div>
+          <button
+            disabled={busy}
+            onClick={() => {
+              busyRef.current = true;
+              setBusy(true);
+              void restoreSources(recovery.sources)
+                .then((loaded) => applyRecovered(recovery, loaded))
+                .catch((e) => setError(String(e)))
+                .finally(() => {
+                  busyRef.current = false;
+                  setBusy(false);
+                });
+            }}
+          >
+            Restore workspace
+          </button>
+          <button onClick={() => setRecovery(null)}>Start fresh</button>
+          <button
+            onClick={() =>
+              void forgetSession(recovery.id)
+                .then(() => setRecovery(null))
+                .catch((e) => setError(String(e)))
+            }
+          >
+            Delete saved copy
+          </button>
+        </div>
+      )}
       {error && (
         <div className="error" role="alert">
           {error}
@@ -679,12 +1069,54 @@ export default function App() {
           </div>
         </aside>
         <section className="editor">
+          {!!pages.length && (
+            <nav className="document-tools" aria-label="Document tools">
+              <button disabled={busy} onClick={() => setDialog("search")}>
+                Find & replace
+              </button>
+              <button disabled={busy} onClick={() => setDialog("pages")}>
+                Organise pages
+              </button>
+              <button disabled={busy} onClick={() => setDialog("review")}>
+                Review changes
+              </button>
+              <div
+                className="compare-switch"
+                role="group"
+                aria-label="Compare page"
+              >
+                <button
+                  aria-pressed={!showOriginal}
+                  className={!showOriginal ? "selected" : ""}
+                  onClick={() => setShowOriginal(false)}
+                >
+                  Edited
+                </button>
+                <button
+                  aria-pressed={showOriginal}
+                  className={showOriginal ? "selected" : ""}
+                  onClick={() => setShowOriginal(true)}
+                >
+                  Original
+                </button>
+              </div>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={highlight}
+                  disabled={showOriginal}
+                  onChange={(e) => setHighlight(e.target.checked)}
+                />{" "}
+                Highlight changes
+              </label>
+            </nav>
+          )}
           <nav className="toolbar" aria-label="Editing tools">
             {tools.map((item) => (
               <button
                 key={item.id}
                 className={tool === item.id ? "selected" : ""}
-                disabled={!active || busy}
+                disabled={!active || busy || showOriginal}
                 onClick={() => {
                   setTool(item.id);
                   setInspection(null);
@@ -695,6 +1127,16 @@ export default function App() {
               </button>
             ))}
             <div className="toolbar-divider" />
+            {tool === "edit" && (
+              <label className="snap-toggle">
+                <input
+                  type="checkbox"
+                  checked={snapEnabled}
+                  onChange={(e) => setSnapEnabled(e.target.checked)}
+                />{" "}
+                Snap
+              </label>
+            )}
             <select
               aria-label="Page zoom"
               value={zoom}
@@ -785,14 +1227,15 @@ export default function App() {
             ) : (
               <div className="document-wrap" style={{ width: `${zoom * 8}px` }}>
                 <div className="page-caption">
-                  PAGE {activeIndex + 1} OF {pages.length}
+                  {showOriginal ? "ORIGINAL SOURCE · " : ""}PAGE{" "}
+                  {activeIndex + 1} OF {pages.length}
                 </div>
                 {source && (
                   <PageView
-                    key={active.id}
+                    key={active.id + (showOriginal ? ":original" : "")}
                     source={source}
-                    page={active}
-                    tool={busy ? "select" : tool}
+                    page={displayPage!}
+                    tool={busy || showOriginal ? "select" : tool}
                     color={color}
                     text={text}
                     boxes={boxes}
@@ -801,6 +1244,23 @@ export default function App() {
                     onSelection={selectTextIds}
                     onMoveText={moveText}
                     onViewport={publishViewport}
+                    snapEnabled={snapEnabled}
+                    highlight={highlight && !showOriginal}
+                    deletedQuads={
+                      !showOriginal && runState.pageId === active.id
+                        ? (runState.original ?? [])
+                            .filter((run) =>
+                              active.textReplacements?.some(
+                                (edit) =>
+                                  edit.runId === run.id &&
+                                  !edit.replacement.trim(),
+                              ),
+                            )
+                            .flatMap((run) =>
+                              run.geometry ? [run.geometry.quad] : [],
+                            )
+                        : []
+                    }
                     onAdd={(annotation) =>
                       commit(
                         pages.map((page) =>
@@ -818,7 +1278,7 @@ export default function App() {
                   />
                 )}
                 <p className="session-note">
-                  Edits live in this tab. Export your PDF before closing.
+                  {saveStatus}. Export a PDF to share your finished document.
                 </p>
               </div>
             )}
@@ -834,23 +1294,40 @@ export default function App() {
             <span>PDFeditor · First edition</span>
           </footer>
         </section>
-        {tool === "edit" && active && source && (
+        {tool === "edit" && active && source && !showOriginal && (
           <OriginalTextEditor
             key={active.id}
             page={active}
             boxes={boxes}
-            loading={readingText}
+            loading={readingText || runState.pageId !== active.id}
             busy={busy}
-            positionReady={pageViewport.pageId === active.id}
+            positionReady={
+              pageViewport.pageId === active.id &&
+              pageViewport.rotation === (active.rotation ?? 0)
+            }
             error=""
             selected={selected}
+            drafts={drafts[active.id] ?? {}}
+            setDrafts={(update) =>
+              setDrafts((current) => ({
+                ...current,
+                [active.id]:
+                  typeof update === "function"
+                    ? update(current[active.id] ?? {})
+                    : update,
+              }))
+            }
             onSelect={selectText}
             onJoin={joinText}
             onSelectLine={() => selectTextIds(lineSelection)}
             canSelectLine={lineSelection.length > selected.length}
             onUngroup={ungroupText}
             onMove={(ids, dx, dy) => {
-              if (pageViewport.pageId !== active.id) return;
+              if (
+                pageViewport.pageId !== active.id ||
+                pageViewport.rotation !== (active.rotation ?? 0)
+              )
+                return;
               const delta = inverseVector(pageViewport.matrix, {
                 x: dx,
                 y: -dy,
@@ -863,38 +1340,72 @@ export default function App() {
                 throw new Error(
                   "Please wait for the current PDF operation to finish.",
                 );
+              setFormatDrafts((current) =>
+                Object.fromEntries(
+                  Object.entries(current).filter(
+                    ([key]) => !key.startsWith(`${active.id}:`),
+                  ),
+                ),
+              );
               commit(
                 pages.map((page) =>
-                  page.id === active.id
-                    ? {
-                        ...page,
-                        annotations: page.annotations.map((annotation) => {
-                          const edit = edits.find(
-                            (edit) => edit.runId === `added:${annotation.id}`,
-                          );
-                          return edit && annotation.kind === "text"
-                            ? { ...annotation, text: edit.replacement }
-                            : annotation;
-                        }),
-                        textReplacements: [
-                          ...(page.textReplacements ?? []).filter(
-                            (existing) =>
-                              !edits.some(
-                                (edit) => edit.runId === existing.runId,
-                              ),
-                          ),
-                          ...edits.filter(
-                            (edit) =>
-                              !edit.runId.startsWith("added:") &&
-                              edit.replacement !== edit.original,
-                          ),
-                        ],
-                      }
-                    : page,
+                  page.id === active.id ? applyTextEdits(page, edits) : page,
                 ),
               );
             }}
-          />
+          >
+            <TextFormatting
+              draft={formatDrafts[`${active.id}:${selected.join("|")}`]}
+              onDraft={(paragraph) =>
+                setFormatDrafts((current) => ({
+                  ...current,
+                  [`${active.id}:${selected.join("|")}`]: paragraph,
+                }))
+              }
+              key={`${active.id}:${selected.join("|")}:${JSON.stringify(active.paragraphs ?? [])}`}
+              page={active}
+              runs={runs}
+              boxes={boxes}
+              selected={selected}
+              disabled={
+                busy ||
+                readingText ||
+                Object.keys(drafts[active.id] ?? {}).some((id) => {
+                  const value = boxes
+                    .flatMap((b) => b.runs)
+                    .find((r) => r.id === id);
+                  return (
+                    value &&
+                    drafts[active.id][id] !==
+                      (active.textReplacements?.find((e) => e.runId === id)
+                        ?.replacement ?? value.text)
+                  );
+                })
+              }
+              onMove={moveText}
+              onChange={(next, selectedGroup) => {
+                if (next.paragraphs !== active.paragraphs)
+                  setFormatDrafts((current) =>
+                    Object.fromEntries(
+                      Object.entries(current).filter(
+                        ([key]) => !key.startsWith(`${active.id}:`),
+                      ),
+                    ),
+                  );
+                commit(pages.map((p) => (p.id === active.id ? next : p)));
+                const group = next.paragraphs?.find(
+                  (p) => p.groupId === selectedGroup,
+                );
+                if (group)
+                  setSelection({
+                    pageId: active.id,
+                    runIds:
+                      next.textGroups?.find((g) => g.id === group.groupId)
+                        ?.runIds ?? [],
+                  });
+              }}
+            />
+          </OriginalTextEditor>
         )}
         {inspection !== null && (
           <aside className="inspector">
@@ -922,6 +1433,55 @@ export default function App() {
           </aside>
         )}
       </main>
+      {dialog === "search" && (
+        <SearchPanel
+          pages={pages}
+          sources={sources}
+          onChange={(next) => {
+            const changed = pages
+              .filter((page, index) => page !== next[index])
+              .map((p) => p.id);
+            setFormatDrafts((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(
+                  ([key]) => !changed.some((id) => key.startsWith(`${id}:`)),
+                ),
+              ),
+            );
+            commit(next);
+          }}
+          onJump={(pageId, runIds) => {
+            setActiveId(pageId);
+            setShowOriginal(false);
+            setTool("edit");
+            setSelection({ pageId, runIds });
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "pages" && (
+        <PageOrganizer
+          pages={pages}
+          sources={sources}
+          onChange={commit}
+          onOpen={setActiveId}
+          onInsert={() => input.current?.click()}
+          onExtract={(chosen) => download(chosen, "extracted-pages.pdf")}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "review" && (
+        <ReviewPanel
+          pages={pages}
+          baseline={baseline}
+          onJump={(id) => {
+            setActiveId(id);
+            setHighlight(true);
+            setShowOriginal(false);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </div>
   );
 }
