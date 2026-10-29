@@ -57,6 +57,7 @@ import {
 import type { SessionSnapshot } from "./session-store";
 import type { Paragraph } from "./typography";
 import type { Point } from "./geometry";
+import { renderPageFrame } from "./page-frame";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 type Tool = "select" | "text" | "rectangle" | "inspect" | "edit";
@@ -129,9 +130,10 @@ function PageView({
   highlight: boolean;
   deletedQuads: Point[][];
 }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
+  const canvas = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
   const [ready, setReady] = useState(false);
+  const [hasFrame, setHasFrame] = useState(false);
   const [viewport, setViewport] = useState<Matrix>(identity);
   const [positionReady, setPositionReady] = useState(false);
   const [positionRotation, setPositionRotation] = useState<number>();
@@ -165,20 +167,24 @@ function PageView({
     })()
       .then(async (pdfPage) => {
         if (cancelled || !canvas.current || !pdfPage) return;
-        const view = pdfPage.getViewport({ scale: 1 });
-        setViewport(view.transform as Matrix);
-        onViewport(view.transform as Matrix, page.id, page.rotation ?? 0);
-        setPositionRotation(page.rotation ?? 0);
-        setPositionReady(true);
-        setSize({ width: view.width, height: view.height });
         const scale = Math.min(window.devicePixelRatio || 1, 2) * 1.4;
-        const target = canvas.current;
-        const renderView = pdfPage.getViewport({ scale });
-        target.width = renderView.width;
-        target.height = renderView.height;
-        render = pdfPage.render({ canvas: target, viewport: renderView });
-        await render.promise;
-        if (!cancelled) setReady(true);
+        await renderPageFrame(pdfPage, scale, {
+          createCanvas: () => document.createElement("canvas"),
+          current: () => !cancelled && !!canvas.current,
+          rendering: (task) => {
+            render = task;
+          },
+          present: (frame, view) => {
+            canvas.current!.replaceChildren(frame);
+            setViewport(view.transform as Matrix);
+            onViewport(view.transform as Matrix, page.id, page.rotation ?? 0);
+            setPositionRotation(page.rotation ?? 0);
+            setPositionReady(true);
+            setSize({ width: view.width, height: view.height });
+            setHasFrame(true);
+            setReady(true);
+          },
+        });
       })
       .catch((error) => {
         if (!cancelled) onError(String(error));
@@ -231,8 +237,8 @@ function PageView({
       className="paper"
       style={{ aspectRatio: `${size.width}/${size.height}` }}
     >
-      <canvas ref={canvas} />
-      {!ready && <div className="rendering">Rendering page…</div>}
+      <div className="page-canvas" ref={canvas} />
+      {!hasFrame && <div className="rendering">Rendering page…</div>}
       <svg
         viewBox={`0 0 ${size.width} ${size.height}`}
         className={`annotation-layer tool-${tool}`}

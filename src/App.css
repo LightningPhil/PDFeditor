@@ -746,6 +746,7 @@ footer {
   height: 100%;
   position: absolute;
   inset: 0;
+  background: #fff;
 }
 .annotation-layer {
   position: absolute;
