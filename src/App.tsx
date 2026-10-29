@@ -58,6 +58,9 @@ import type { SessionSnapshot } from "./session-store";
 import type { Paragraph } from "./typography";
 import type { Point } from "./geometry";
 import { renderPageFrame } from "./page-frame";
+import { ReferenceAlignment } from "./ReferenceAlignment";
+import { emptyReferences } from "./reference-alignment";
+import type { AlignmentReferences } from "./reference-alignment";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
 type Tool = "select" | "text" | "rectangle" | "inspect" | "edit";
@@ -111,6 +114,7 @@ function PageView({
   snapEnabled,
   highlight,
   deletedQuads,
+  references,
 }: {
   source: LoadedSource;
   page: EditorPage;
@@ -129,6 +133,7 @@ function PageView({
   snapEnabled: boolean;
   highlight: boolean;
   deletedQuads: Point[][];
+  references: AlignmentReferences;
 }) {
   const canvas = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
@@ -138,6 +143,10 @@ function PageView({
   const [positionReady, setPositionReady] = useState(false);
   const [positionRotation, setPositionRotation] = useState<number>();
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
+  const referenceRunIds = useMemo(
+    () => new Set(references.runIds),
+    [references.runIds],
+  );
   useEffect(() => {
     let cancelled = false;
     let previewTask: PDFDocumentLoadingTask | undefined;
@@ -332,6 +341,42 @@ function PageView({
         </svg>
       )}
       {tool === "edit" && (
+        <svg
+          className="reference-layer"
+          viewBox={`0 0 ${size.width} ${size.height}`}
+          aria-label="Fixed alignment references"
+        >
+          <g transform={`matrix(${viewport.join(" ")})`}>
+            {boxes.flatMap((box) =>
+              box.pieces
+                .filter((piece) => referenceRunIds.has(piece.runId))
+                .map((piece) => (
+                  <polygon
+                    key={piece.runId}
+                    points={piece.quad.map((p) => `${p.x},${p.y}`).join(" ")}
+                  />
+                )),
+            )}
+            {page.annotations
+              .filter(
+                (a) =>
+                  a.kind === "rectangle" && references.shapeIds.includes(a.id),
+              )
+              .map((a) =>
+                a.kind === "rectangle" ? (
+                  <rect
+                    key={a.id}
+                    x={a.x}
+                    y={a.y}
+                    width={a.width}
+                    height={a.height}
+                  />
+                ) : null,
+              )}
+          </g>
+        </svg>
+      )}
+      {tool === "edit" && (
         <TextBoxOverlay
           disabled={!ready}
           positionReady={
@@ -371,6 +416,9 @@ export default function App() {
   const [formatDrafts, setFormatDrafts] = useState<Record<string, Paragraph>>(
     {},
   );
+  const [alignmentReferences, setAlignmentReferences] = useState<
+    Record<string, AlignmentReferences>
+  >({});
   const [baseline, setBaseline] = useState<EditorPage[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>(
     {},
@@ -416,6 +464,7 @@ export default function App() {
     setZoom(snapshot.zoom ?? 85);
     setSelection(snapshot.selection ?? { pageId: "", runIds: [] });
     setFormatDrafts(snapshot.formatDrafts ?? {});
+    setAlignmentReferences(snapshot.alignmentReferences ?? {});
     if (
       ["select", "edit", "text", "rectangle", "inspect"].includes(
         snapshot.tool ?? "",
@@ -482,6 +531,7 @@ export default function App() {
         zoom,
         selection,
         formatDrafts,
+        alignmentReferences,
         tool,
       };
       void saveSession(snapshot)
@@ -512,6 +562,7 @@ export default function App() {
     sessionId,
     selection,
     formatDrafts,
+    alignmentReferences,
     tool,
   ]);
   useEffect(
@@ -748,6 +799,7 @@ export default function App() {
         zoom,
         selection,
         formatDrafts,
+        alignmentReferences,
         tool,
       });
       const id = uid();
@@ -761,6 +813,7 @@ export default function App() {
       setBaseline([]);
       setDrafts({});
       setFormatDrafts({});
+      setAlignmentReferences({});
       setSelection({ pageId: "", runIds: [] });
       setTool("select");
       setShowOriginal(false);
@@ -1251,6 +1304,9 @@ export default function App() {
                     onMoveText={moveText}
                     onViewport={publishViewport}
                     snapEnabled={snapEnabled}
+                    references={
+                      alignmentReferences[active.id] ?? emptyReferences
+                    }
                     highlight={highlight && !showOriginal}
                     deletedQuads={
                       !showOriginal && runState.pageId === active.id
@@ -1360,6 +1416,51 @@ export default function App() {
               );
             }}
           >
+            <ReferenceAlignment
+              page={active}
+              runs={runs}
+              boxes={boxes}
+              selected={selected}
+              references={alignmentReferences[active.id] ?? emptyReferences}
+              viewport={pageViewport.matrix}
+              disabled={
+                busy ||
+                readingText ||
+                runState.pageId !== active.id ||
+                pageViewport.pageId !== active.id ||
+                pageViewport.rotation !== (active.rotation ?? 0)
+              }
+              onReferences={(references) =>
+                setAlignmentReferences((current) => ({
+                  ...current,
+                  [active.id]: references,
+                }))
+              }
+              onPin={() => {
+                const runIds = boxes
+                  .filter((box) => selected.includes(box.id))
+                  .flatMap((box) =>
+                    box.runs
+                      .filter((run) =>
+                        (
+                          active.textReplacements?.find(
+                            (edit) => edit.runId === run.id,
+                          )?.replacement ?? run.text
+                        ).trim(),
+                      )
+                      .map((run) => run.id),
+                  );
+                setAlignmentReferences((current) => ({
+                  ...current,
+                  [active.id]: { runIds: [...new Set(runIds)], shapeIds: [] },
+                }));
+                selectTextIds([]);
+              }}
+              onChange={(next) => {
+                if (next !== active)
+                  commit(pages.map((p) => (p.id === active.id ? next : p)));
+              }}
+            />
             <TextFormatting
               draft={formatDrafts[`${active.id}:${selected.join("|")}`]}
               onDraft={(paragraph) =>

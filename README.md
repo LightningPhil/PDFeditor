@@ -62,6 +62,33 @@ Two boxes can align to edges, centres or baselines; three can distribute gaps.
 Snap can be disabled for free placement. Annotations and previews now use native
 page coordinate conversion on rotated and cropped pages.
 
+## Align text relative to other items
+
+In **Edit text → Align to other items**, select one or more text boxes and choose
+**Pin selection as references**. The selection clears so you can choose the text
+to move. Alternatively, **Choose reference items…** lets you pick text boxes and
+added rectangles. Purple outlines identify the references; they stay fixed when
+an alignment command runs. Multiple items define one combined reference frame.
+
+Use the one-click edge, centre or baseline buttons, or place text **Left of**,
+**Right of**, **Above** or **Below references** with an exact gap. **Custom edges &
+offsets** can match different moving/reference edges and apply horizontal and
+vertical offsets together. Custom controls report the planned displacement before
+applying. Positive offsets go right or down on the displayed page, including
+rotated/cropped/scaled pages. These are view-point offsets rather than the native
+lower-left coordinates used by **Position & alignment**.
+
+**Move selection as one block** retains the selected boxes' internal spacing;
+turn it off to align each box separately. Baselines require horizontal text on
+one line; ambiguous multi-line or shape baselines produce an explicit error.
+Targets cannot contain pinned text. Missing/deleted references stop the whole
+operation, and repeated alignment does not add rounding drift or empty undo steps.
+Pinned pieces follow joins/splits and are restored with local workspace recovery.
+Alignment is an ordinary native-text move with undo/redo and PDF export; the
+reference guides themselves are never exported. Reference choices currently cover
+supported positioned text and rectangles added in PDFeditor, not arbitrary source
+graphics or images.
+
 ## Search, review and recovery
 
 **Find & replace** searches editable text across PDF drawing fragments. Other

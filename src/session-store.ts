@@ -1,5 +1,6 @@
 import type { EditorPage, Source } from "./pdf";
 import type { Paragraph } from "./typography";
+import type { AlignmentReferences } from "./reference-alignment";
 export interface SessionSnapshot {
   version: 1;
   id: string;
@@ -14,6 +15,7 @@ export interface SessionSnapshot {
   selection?: { pageId: string; runIds: string[] };
   formatDrafts?: Record<string, Paragraph>;
   tool?: string;
+  alignmentReferences?: Record<string, AlignmentReferences>;
 }
 const database = "PDFeditor-local-work";
 function open(): Promise<IDBDatabase> {
