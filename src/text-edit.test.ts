@@ -3,6 +3,7 @@ import {
   PDFArray,
   PDFDocument,
   PDFName,
+  PDFDict,
   PDFRawStream,
   StandardFonts,
   decodePDFRawStream,
@@ -43,6 +44,67 @@ function decoded(doc: PDFDocument, index = 0) {
 }
 
 describe("original text editing", () => {
+  it("decodes two-byte CID fonts and both forms of Unicode ranges", async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 500]);
+    const cmap =
+      "1 begincodespacerange <0000> <FFFF> endcodespacerange 1 beginbfchar <0001> <0041> endbfchar 1 beginbfrange <0002> <0003> [<0042> <0043>] endbfrange 1 beginbfrange <0004> <0005> <0044> endbfrange";
+    const descendant = doc.context.register(
+      doc.context.obj({
+        Type: "Font",
+        Subtype: "CIDFontType2",
+        BaseFont: "Generated",
+        DW: 900,
+        W: [1, [500, 600, 700, 800]],
+      }),
+    );
+    const font = doc.context.register(
+      doc.context.obj({
+        Type: "Font",
+        Subtype: "Type0",
+        BaseFont: "Generated",
+        Encoding: "Identity-H",
+        DescendantFonts: [descendant],
+        ToUnicode: doc.context.register(doc.context.flateStream(cmap)),
+      }),
+    );
+    page.node.set(
+      PDFName.of("Resources"),
+      doc.context.obj({ Font: { F1: font } }),
+    );
+    page.node.set(
+      PDFName.of("Contents"),
+      doc.context.register(
+        doc.context.flateStream(
+          "BT /F1 12 Tf [300 <000100020003>] TJ <0001> Tj ET",
+        ),
+      ),
+    );
+    const bytes = await doc.save();
+    const runs = await inspectEditableText(bytes, 0);
+    expect(runs.map((run) => run.text)).toEqual(["ABC", "A"]);
+    const loaded = await PDFDocument.load(bytes);
+    replacePageText(loaded.getPage(0), [
+      { runId: runs[0].id, original: "ABC", replacement: "DE" },
+    ]);
+    expect(decoded(loaded)).toContain("[300 <00040005> -100] TJ");
+    expect((await inspectEditableText(await loaded.save(), 0))[0].text).toBe(
+      "DE",
+    );
+  });
+  it("supports optional-content properties and visible stroke text but skips clipping", async () => {
+    const doc = await PDFDocument.load(
+      await fixture(
+        "BT /F1 12 Tf /OC /Layer BDC 2 Tr (Visible) Tj EMC 7 Tr (Clip) Tj ET",
+      ),
+    );
+    const properties = doc.context.obj({ Layer: { Type: "OCG" } });
+    doc.getPage(0).node.Resources()!.set(PDFName.of("Properties"), properties);
+    expect(
+      (await inspectEditableText(await doc.save(), 0)).map((run) => run.text),
+    ).toEqual(["Visible"]);
+    expect(properties).toBeInstanceOf(PDFDict);
+  });
   it("replaces the original operator and preserves other copies of the same page", async () => {
     const bytes = await fixture();
     const [run] = await inspectEditableText(bytes, 0);
@@ -93,9 +155,19 @@ describe("original text editing", () => {
     );
     expect(nested[0].text).toBe("Nested (parentheses)");
   });
-  it("keeps split text, inline images, clipping text and ActualText read-only", async () => {
+  it("edits split text while preserving the following text advance", async () => {
+    const bytes = await fixture("BT /F1 12 Tf (One) Tj (Two) Tj ET");
+    const runs = await inspectEditableText(bytes, 0);
+    expect(runs.map((run) => run.text)).toEqual(["One", "Two"]);
+    const doc = await PDFDocument.load(bytes);
+    replacePageText(doc.getPage(0), [
+      { runId: runs[0].id, original: "One", replacement: "New" },
+    ]);
+    expect(decoded(doc)).toContain("110] TJ");
+    expect(decoded(doc)).toContain("(Two) Tj");
+  });
+  it("keeps inline images, clipping text and ActualText read-only", async () => {
     for (const content of [
-      "BT /F1 12 Tf (One) Tj (Two) Tj ET",
       "BI /W 1 /H 1 ID bytes EI BT /F1 12 Tf (Text) Tj ET",
       "BT /F1 12 Tf 7 Tr (Clip) Tj ET",
       "/Span << /ActualText (Old) >> BDC BT /F1 12 Tf (Text) Tj ET EMC",

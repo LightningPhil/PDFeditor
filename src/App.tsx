@@ -269,8 +269,8 @@ function OriginalTextEditor({
       {runs === null && !error && <p>Reading original text…</p>}
       {runs?.length === 0 && (
         <p>
-          No supported text runs on this page yet. Scans, composite fonts and
-          text split across several drawing commands need further support.
+          No supported original text was found on this page. Scans and some font
+          encodings need further support.
         </p>
       )}
       {runs?.map((run, index) => {

@@ -8,6 +8,7 @@ import {
   decodePDFRawStream,
 } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
+import { Font, FontNames, Encodings } from "@pdf-lib/standard-fonts";
 
 export interface TextReplacement {
   runId: string;
@@ -33,6 +34,12 @@ interface Codec {
   encode: (text: string) => number[];
   name: string;
   characters: string;
+  advance: (
+    bytes: number[],
+    size: number,
+    characterSpacing: number,
+    wordSpacing: number,
+  ) => number;
 }
 interface Run extends EditableRun {
   start: number;
@@ -40,6 +47,10 @@ interface Run extends EditableRun {
   codec: Codec;
   stream: number;
   leading: string[];
+  advance: number;
+  size: number;
+  characterSpacing: number;
+  wordSpacing: number;
 }
 const name = (value: string) => PDFName.of(value);
 const binary = (bytes: Uint8Array) =>
@@ -184,49 +195,135 @@ function tokenize(input: string): Token[] {
 
 function fontCodec(font: PDFDict): Codec | null {
   const subtype = font.get(name("Subtype"))?.toString();
-  if (subtype !== "/Type1" && subtype !== "/TrueType") return null;
+  const composite = subtype === "/Type0";
+  if (!composite && subtype !== "/Type1" && subtype !== "/TrueType")
+    return null;
+  if (composite && font.get(name("Encoding"))?.toString() !== "/Identity-H")
+    return null;
+  const codeBytes = composite ? 2 : 1;
   const base =
     font.get(name("BaseFont"))?.toString().slice(1) ?? "Unknown font";
   const map = new Map<number, string>();
+  const widths = new Map<number, number>();
+  let defaultWidth = 0;
+  if (composite) {
+    const descendant = font
+      .lookup(name("DescendantFonts"), PDFArray)
+      .lookup(0, PDFDict);
+    defaultWidth =
+      descendant.lookupMaybe(name("DW"), PDFNumber)?.asNumber() ?? 1000;
+    const entries = descendant.lookupMaybe(name("W"), PDFArray);
+    for (let i = 0; entries && i < entries.size();) {
+      const first = entries.lookup(i++, PDFNumber).asNumber();
+      const next = entries.lookup(i++);
+      if (next instanceof PDFArray) {
+        for (let j = 0; j < next.size(); j++)
+          widths.set(first + j, next.lookup(j, PDFNumber).asNumber());
+      } else if (next instanceof PDFNumber) {
+        const last = next.asNumber();
+        const width = entries.lookup(i++, PDFNumber).asNumber();
+        if (last - first > 65535) return null;
+        for (let code = first; code <= last; code++) widths.set(code, width);
+      } else return null;
+    }
+  } else {
+    const entries = font.lookupMaybe(name("Widths"), PDFArray);
+    const first =
+      font.lookupMaybe(name("FirstChar"), PDFNumber)?.asNumber() ?? 0;
+    if (entries)
+      for (let i = 0; i < entries.size(); i++)
+        widths.set(first + i, entries.lookup(i, PDFNumber).asNumber());
+    if (
+      !entries &&
+      Object.values(FontNames).includes(base as FontNames) &&
+      !["Symbol", "ZapfDingbats"].includes(base)
+    ) {
+      const metrics = Font.load(base as FontNames);
+      for (const codePoint of Encodings.WinAnsi.supportedCodePoints) {
+        const glyph = Encodings.WinAnsi.encodeUnicodeCodePoint(codePoint);
+        const width = metrics.getWidthOfGlyph(glyph.name);
+        if (typeof width === "number") widths.set(glyph.code, width);
+      }
+    }
+    if (!widths.size) return null;
+  }
+  const addMapping = (source: string, destination: string) => {
+    if (
+      source.length !== codeBytes * 2 ||
+      !destination.length ||
+      destination.length % 4
+    )
+      throw new Error("Unsupported Unicode mapping");
+    const decoded = String.fromCharCode(
+      ...(destination.match(/.{4}/g) ?? []).map((value) => parseInt(value, 16)),
+    );
+    if (Array.from(decoded).length !== 1)
+      throw new Error("Multi-character glyph mapping is read-only");
+    map.set(parseInt(source, 16), decoded);
+  };
   const unicode = font.lookup(name("ToUnicode"));
   if (unicode instanceof PDFRawStream) {
     const cmap = binary(decodePDFRawStream(unicode).decode());
-    // Only single-byte bfchar CMaps are currently supported.
-    if (/beginbfrange/.test(cmap) || !/<00>\s*<FF>/i.test(cmap)) return null;
+    const ranges = [
+      ...cmap.matchAll(/begincodespacerange([\s\S]*?)endcodespacerange/g),
+    ].flatMap((section) => [
+      ...section[1].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]+)>/gi),
+    ]);
+    if (
+      !ranges.length ||
+      ranges.some(
+        (range) =>
+          range[1].length !== codeBytes * 2 ||
+          range[2].length !== codeBytes * 2,
+      )
+    )
+      return null;
     for (const section of cmap.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
       for (const pair of section[1].matchAll(
-        /<([0-9a-f]{2})>\s*<([0-9a-f]+)>/gi,
+        /<([0-9a-f]+)>\s*<([0-9a-f]+)>/gi,
       )) {
-        if (pair[2].length % 4) return null;
-        const decoded = String.fromCharCode(
-          ...(pair[2].match(/.{4}/g) ?? []).map((value) => parseInt(value, 16)),
-        );
-        if (Array.from(decoded).length !== 1) return null;
-        map.set(parseInt(pair[1], 16), decoded);
+        addMapping(pair[1], pair[2]);
+      }
+    }
+    for (const section of cmap.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+      for (const range of section[1].matchAll(
+        /<([0-9a-f]+)>\s*<([0-9a-f]+)>\s*(<([0-9a-f]+)>|\[([^\]]*)\])/gi,
+      )) {
+        const first = parseInt(range[1], 16),
+          last = parseInt(range[2], 16);
+        if (last < first || last - first > 65535) return null;
+        const destinations =
+          range[5] === undefined
+            ? null
+            : [...range[5].matchAll(/<([0-9a-f]+)>/gi)].map(
+                (match) => match[1],
+              );
+        if (destinations && destinations.length !== last - first + 1)
+          return null;
+        for (let code = first; code <= last; code++) {
+          const destination = destinations
+            ? destinations[code - first]
+            : (BigInt("0x" + range[4]) + BigInt(code - first))
+                .toString(16)
+                .padStart(range[4].length, "0");
+          addMapping(
+            code.toString(16).padStart(codeBytes * 2, "0"),
+            destination,
+          );
+        }
       }
     }
   } else {
+    if (composite) return null;
     const encoding = font.get(name("Encoding"))?.toString();
     if (encoding !== "/WinAnsiEncoding" && encoding !== "/MacRomanEncoding")
       return null;
     const decoder = new TextDecoder(
       encoding === "/WinAnsiEncoding" ? "windows-1252" : "macintosh",
     );
-    const widths = font.lookupMaybe(name("Widths"), PDFArray);
-    const first =
-      font.lookupMaybe(name("FirstChar"), PDFNumber)?.asNumber() ?? 0;
-    const standard =
-      /^(Helvetica|Times-|Courier)/.test(base) && subtype === "/Type1";
     for (let code = 32; code < 256; code++) {
       // Subset fonts may name a normal encoding yet contain only a few glyphs.
-      if (
-        !standard &&
-        (!widths ||
-          code < first ||
-          code >= first + widths.size() ||
-          widths.lookup(code - first, PDFNumber).asNumber() <= 0)
-      )
-        continue;
+      if ((widths.get(code) ?? 0) <= 0) continue;
       const decoded = decoder.decode(Uint8Array.of(code));
       if (decoded !== "\ufffd" && !/[\x00-\x1f\x7f-\x9f]/.test(decoded))
         map.set(code, decoded);
@@ -236,11 +333,18 @@ function fontCodec(font: PDFDict): Codec | null {
   const reverse = new Map(
     Array.from(map, ([code, character]) => [character, code]),
   );
+  function codes(bytes: number[]) {
+    if (bytes.length % codeBytes) throw new Error("Incomplete character code");
+    const result: number[] = [];
+    for (let i = 0; i < bytes.length; i += codeBytes)
+      result.push(codeBytes === 1 ? bytes[i] : bytes[i] * 256 + bytes[i + 1]);
+    return result;
+  }
   return {
     name: base,
     characters: Array.from(reverse.keys()).sort().join(""),
     decode(bytes) {
-      return bytes
+      return codes(bytes)
         .map((code) => {
           const character = map.get(code);
           if (character === undefined) throw new Error("Unmapped glyph");
@@ -249,14 +353,28 @@ function fontCodec(font: PDFDict): Codec | null {
         .join("");
     },
     encode(text) {
-      return Array.from(text, (character) => {
+      return Array.from(text).flatMap((character) => {
         const code = reverse.get(character);
         if (code === undefined)
           throw new Error(
             `The original font does not contain “${character}”. Choose characters already available in this font.`,
           );
-        return code;
+        return codeBytes === 1 ? [code] : [code >> 8, code & 255];
       });
+    },
+    advance(bytes, size, characterSpacing, wordSpacing) {
+      if (!Number.isFinite(size) || size === 0)
+        throw new Error("Invalid font size");
+      return codes(bytes).reduce(
+        (sum, code) =>
+          sum +
+          (widths.get(code) ?? defaultWidth) +
+          (1000 *
+            (characterSpacing +
+              (codeBytes === 1 && code === 32 ? wordSpacing : 0))) /
+            size,
+        0,
+      );
     },
   };
 }
@@ -275,8 +393,6 @@ function streams(page: PDFPage): string[] {
 }
 
 function findRuns(page: PDFPage, content: string[]): Run[] {
-  // Rendering modes persist across streams; do not edit text that might clip.
-  if (content.some((input) => /\bTr\b/.test(input))) return [];
   const fonts = page.node.Resources()?.lookupMaybe(name("Font"), PDFDict);
   if (!fonts) return [];
   const codecs = new Map<string, Codec>();
@@ -285,36 +401,31 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
       const codec = fontCodec(page.doc.context.lookup(value, PDFDict));
       if (codec) codecs.set(key.toString(), codec);
     } catch {
-      /* Unsupported font stays read-only. */
+      /* Unsupported fonts stay read-only. */
     }
   }
   const runs: Run[] = [];
-  let font = "";
-  const fontStack: string[] = [];
+  let state = {
+    font: "",
+    size: 0,
+    characterSpacing: 0,
+    wordSpacing: 0,
+    mode: 0,
+  };
+  const stack: (typeof state)[] = [];
+  const marked: boolean[] = [];
+  let inText = false;
   content.forEach((input, stream) => {
-    // ActualText can contain a second textual representation. Do not leave it stale.
-    if (/\/ActualText\b/.test(input)) {
-      font = "";
-      fontStack.length = 0;
-      return;
-    }
     let tokens: Token[];
     try {
       tokens = tokenize(input);
     } catch {
-      font = "";
-      fontStack.length = 0;
-      return;
-    }
-    if (tokens.some((token) => token.kind === "word" && token.raw === "Tr")) {
-      font = "";
-      fontStack.length = 0;
+      state = { ...state, font: "", mode: -1 };
+      stack.length = 0;
+      inText = false;
       return;
     }
     let operands: Token[] = [];
-    let inText = false;
-    let shows: { operand: Token; operator: Token; font: string }[] = [];
-    let unsupported = false;
     for (const token of tokens) {
       const operator =
         token.kind === "word" && !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token.raw);
@@ -322,64 +433,99 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
         operands.push(token);
         continue;
       }
-      if (token.raw === "q") fontStack.push(font);
-      if (token.raw === "Q") font = fontStack.pop() ?? "";
-      if (token.raw === "Tf") font = operands.at(-2)?.raw ?? "";
-      if (token.raw === "BT") {
-        inText = true;
-        shows = [];
-        unsupported = false;
+      const number = (offset = -1) => Number(operands.at(offset)?.raw);
+      if (token.raw === "q") stack.push({ ...state });
+      if (token.raw === "Q")
+        state = stack.pop() ?? { ...state, font: "", mode: -1 };
+      if (token.raw === "Tf") {
+        state.font = operands.at(-2)?.raw ?? "";
+        state.size = number();
       }
-      if (inText && ["Tj", "TJ"].includes(token.raw)) {
+      if (token.raw === "Tc") state.characterSpacing = number();
+      if (token.raw === "Tw") state.wordSpacing = number();
+      if (token.raw === "Tr") state.mode = number();
+      if (token.raw === "BT") inText = true;
+      if (token.raw === "ET") inText = false;
+      if (token.raw === "BMC" || token.raw === "BDC") {
+        const property = operands.at(-1);
+        let hasActualText = /\/ActualText\b/.test(property?.raw ?? "");
+        if (token.raw === "BDC" && property?.kind === "name") {
+          const properties = page.node
+            .Resources()
+            ?.lookupMaybe(name("Properties"), PDFDict);
+          const dictionary = properties?.lookup(name(property.raw.slice(1)));
+          hasActualText =
+            !(dictionary instanceof PDFDict) ||
+            dictionary.has(name("ActualText"));
+        }
+        marked.push(token.raw === "BDC" && hasActualText);
+      }
+      if (token.raw === "EMC") marked.pop();
+      if (
+        inText &&
+        ["Tj", "TJ"].includes(token.raw) &&
+        [0, 1, 2].includes(state.mode) &&
+        !marked.some(Boolean)
+      ) {
         const operand = operands.at(-1);
-        if (operand) shows.push({ operand, operator: token, font });
-      }
-      // Quote operators, clipping text and XObjects need richer state handling.
-      if (inText && ["'", '"', "Tr", "Do"].includes(token.raw))
-        unsupported = true;
-      if (token.raw === "ET") {
-        inText = false;
-        if (!unsupported && shows.length === 1) {
-          const show = shows[0];
-          const codec = codecs.get(show.font);
-          if (codec) {
-            try {
-              const parts =
-                show.operand.kind === "array"
-                  ? (show.operand.children ?? [])
-                  : [show.operand];
-              if (
-                parts.some(
-                  (part) =>
-                    part.kind !== "string" &&
-                    !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(part.raw),
-                )
+        const codec = codecs.get(state.font);
+        if (operand && codec) {
+          try {
+            if (
+              (token.raw === "Tj" && operand.kind !== "string") ||
+              (token.raw === "TJ" && operand.kind !== "array")
+            )
+              throw new Error("Invalid text operand");
+            const parts =
+              operand.kind === "array" ? (operand.children ?? []) : [operand];
+            if (
+              parts.some(
+                (part) =>
+                  part.kind !== "string" &&
+                  !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(part.raw),
               )
-                throw new Error("Unsupported text array");
-              const text = parts
-                .filter((part) => part.kind === "string")
-                .map((part) => codec.decode(part.bytes ?? []))
-                .join("");
-              if (text.trim())
-                runs.push({
-                  id: `${stream}:${show.operand.start}`,
-                  text,
-                  font: codec.name,
-                  characters: codec.characters,
-                  codec,
-                  stream,
-                  start: show.operand.start,
-                  end: show.operator.end,
-                  leading: parts
-                    .slice(
-                      0,
-                      parts.findIndex((part) => part.kind === "string"),
+            )
+              throw new Error("Unsupported text array");
+            const strings = parts.filter((part) => part.kind === "string");
+            const text = strings
+              .map((part) => codec.decode(part.bytes ?? []))
+              .join("");
+            const advance = parts.reduce(
+              (sum, part) =>
+                sum +
+                (part.kind === "string"
+                  ? codec.advance(
+                      part.bytes ?? [],
+                      state.size,
+                      state.characterSpacing,
+                      state.wordSpacing,
                     )
-                    .map((part) => part.raw),
-                });
-            } catch {
-              /* Leave undecodable text read-only. */
-            }
+                  : -Number(part.raw)),
+              0,
+            );
+            if (text.trim() && Number.isFinite(advance))
+              runs.push({
+                id: stream + ":" + operand.start,
+                text,
+                font: codec.name,
+                characters: codec.characters,
+                codec,
+                stream,
+                start: operand.start,
+                end: token.end,
+                advance,
+                leading: parts
+                  .slice(
+                    0,
+                    parts.findIndex((part) => part.kind === "string"),
+                  )
+                  .map((part) => part.raw),
+                size: state.size,
+                characterSpacing: state.characterSpacing,
+                wordSpacing: state.wordSpacing,
+              });
+          } catch {
+            /* Leave undecodable text read-only. */
           }
         }
       }
@@ -421,11 +567,17 @@ export function replacePageText(
       throw new Error("Use a single line for this text run.");
     const bytes = run.codec.encode(edit.replacement);
     const hex = `<${bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")}>`;
+    const newAdvance =
+      run.codec.advance(
+        bytes,
+        run.size,
+        run.characterSpacing,
+        run.wordSpacing,
+      ) - run.leading.reduce((sum, value) => sum + Number(value), 0);
+    const compensation = Number((newAdvance - run.advance).toFixed(8));
     return {
       ...run,
-      value: run.leading.length
-        ? `[${run.leading.join(" ")} ${hex}] TJ`
-        : `${hex} Tj`,
+      value: `[${run.leading.join(" ")} ${hex} ${compensation}] TJ`,
     };
   });
   edits

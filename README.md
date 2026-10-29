@@ -37,15 +37,19 @@ The custom content-stream editor in `src/text-edit.ts` rewrites the original
 the page. Original font resources, text matrices and colours are retained.
 This is ordinary editing, not secure redaction or removal of metadata/history.
 
-Current support is deliberately limited: one text-showing command per text
-object, with simple WinAnsi/MacRoman fonts or single-byte `bfchar` Unicode maps.
+Current support includes multiple text commands per text object, simple
+WinAnsi/MacRoman fonts and horizontal Identity-H composite fonts. Single-byte
+and two-byte Unicode maps support `bfchar` and both `bfrange` forms.
 Embedded subset fonts allow only their available glyphs. Unsupported runs stay
 read-only, and missing glyphs cause an explicit error. Replacements are single
 lines and do not reflow surrounding content; longer text can overlap neighbours.
 Replacing a `TJ` run resets its internal kerning to the font's normal spacing.
-Composite/CID fonts, range-based CMaps, split text objects, Form XObject text,
-inline-image streams and text with ActualText or rendering-mode changes need
-further work. Scans need OCR.
+The engine calculates glyph advances and retains the original final text position,
+including character/word spacing and leading adjustments, so later text commands
+do not shift. Fill, stroke and combined visible text modes are supported, along
+with optional-content layers. Invisible/clipping text, unsupported encodings,
+Form XObject text, inline-image streams and runs with ActualText stay read-only.
+Scans need a separate OCR-guided pixel-editing workflow.
 
 Local proof command (requires the optional PDF.js canvas dependency):
 
@@ -57,6 +61,22 @@ This edits the first page only, renders before/after PNGs and verifies the
 replacement using independent PDF.js text extraction. Outputs are Git-ignored.
 
 Put local examples and desired edits in `samples/`; they are ignored by Git.
+
+## Batch sample verification
+
+`scripts/audit-samples.ts` opens and renders the first page of every local sample.
+`scripts/edit-all-samples.ts` takes a private JSON plan containing exactly one
+edit per sample and exports complete documents, preserving their remaining pages.
+It reopens outputs, checks page sizes/counts and annotation counts, checks original
+file hashes, independently extracts text, and renders before/after comparisons.
+Its private outputs and report are written under `output/pdf/edited-samples/`.
+
+The local scan proof in `scripts/prove-scan-edit.ts` uses Tesseract.js on the
+computer to locate a word, replaces one image glyph with an existing glyph from
+the same line, and checks the resulting image with OCR again. It is a constrained
+proof for a single-image page, not an interactive OCR feature or general scan editor.
+It preserves the scan's dimensions and annotations and drops the replaced image
+from the copied document. OCR downloads language data; documents are not uploaded.
 
 ## Current limits
 
