@@ -5,10 +5,13 @@ import {
   PDFName,
   PDFNumber,
   PDFRawStream,
+  PDFContentStream,
   decodePDFRawStream,
 } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
 import { Font, FontNames, Encodings } from "@pdf-lib/standard-fonts";
+import { identity, multiply, transform, inverseVector } from "./geometry";
+import type { Matrix, Point } from "./geometry";
 
 export interface TextReplacement {
   runId: string;
@@ -20,6 +23,13 @@ export interface EditableRun {
   text: string;
   font: string;
   characters: string;
+  geometry?: { quad: Point[]; baseline: Point };
+}
+export interface TextOffset {
+  runId: string;
+  original: string;
+  dx: number;
+  dy: number;
 }
 interface Token {
   kind: "string" | "name" | "word" | "array" | "dict";
@@ -34,6 +44,8 @@ interface Codec {
   encode: (text: string) => number[];
   name: string;
   characters: string;
+  ascent: number;
+  descent: number;
   advance: (
     bytes: number[],
     size: number,
@@ -51,6 +63,10 @@ interface Run extends EditableRun {
   size: number;
   characterSpacing: number;
   wordSpacing: number;
+  matrix?: Matrix;
+  horizontalScale: number;
+  rise: number;
+  parts: Token[];
 }
 const name = (value: string) => PDFName.of(value);
 const binary = (bytes: Uint8Array) =>
@@ -205,11 +221,13 @@ function fontCodec(font: PDFDict): Codec | null {
     font.get(name("BaseFont"))?.toString().slice(1) ?? "Unknown font";
   const map = new Map<number, string>();
   const widths = new Map<number, number>();
+  let metricsSource = font;
   let defaultWidth = 0;
   if (composite) {
     const descendant = font
       .lookup(name("DescendantFonts"), PDFArray)
       .lookup(0, PDFDict);
+    metricsSource = descendant;
     defaultWidth =
       descendant.lookupMaybe(name("DW"), PDFNumber)?.asNumber() ?? 1000;
     const entries = descendant.lookupMaybe(name("W"), PDFArray);
@@ -343,6 +361,16 @@ function fontCodec(font: PDFDict): Codec | null {
   return {
     name: base,
     characters: Array.from(reverse.keys()).sort().join(""),
+    ascent:
+      (metricsSource
+        .lookupMaybe(name("FontDescriptor"), PDFDict)
+        ?.lookupMaybe(name("Ascent"), PDFNumber)
+        ?.asNumber() ?? 800) / 1000,
+    descent:
+      (metricsSource
+        .lookupMaybe(name("FontDescriptor"), PDFDict)
+        ?.lookupMaybe(name("Descent"), PDFNumber)
+        ?.asNumber() ?? -200) / 1000,
     decode(bytes) {
       return codes(bytes)
         .map((code) => {
@@ -386,10 +414,70 @@ function streams(page: PDFPage): string[] {
     contents instanceof PDFArray ? contents.asArray() : [contents];
   return entries.map((ref) => {
     const stream = page.doc.context.lookup(ref);
+    if (stream instanceof PDFContentStream)
+      return binary(stream.getUnencodedContents());
     if (!(stream instanceof PDFRawStream))
       throw new Error("Unsupported page content stream");
     return binary(decodePDFRawStream(stream).decode());
   });
+}
+
+function runGeometry(run: Run, replacement?: string): EditableRun["geometry"] {
+  if (
+    !run.matrix ||
+    !Number.isFinite(run.horizontalScale) ||
+    Math.abs(run.horizontalScale) < 1e-12
+  )
+    return;
+  try {
+    inverseVector(run.matrix, { x: 0, y: 0 });
+  } catch {
+    return;
+  }
+  const parts =
+    replacement !== undefined && replacement !== run.text
+      ? [
+          ...run.leading.map((raw) => ({ kind: "word", raw }) as Token),
+          { kind: "string", bytes: run.codec.encode(replacement) } as Token,
+        ]
+      : run.parts;
+  let cursor = 0,
+    first = NaN,
+    left = Infinity,
+    right = -Infinity;
+  for (const part of parts) {
+    if (part.kind === "string") {
+      const advance =
+        (run.codec.advance(
+          part.bytes ?? [],
+          run.size,
+          run.characterSpacing,
+          run.wordSpacing,
+        ) *
+          run.size *
+          run.horizontalScale) /
+        1000;
+      if (part.bytes?.length) {
+        if (!Number.isFinite(first)) first = cursor;
+        left = Math.min(left, cursor, cursor + advance);
+        right = Math.max(right, cursor, cursor + advance);
+      }
+      cursor += advance;
+    } else cursor -= (Number(part.raw) * run.size * run.horizontalScale) / 1000;
+  }
+  if (replacement === "") left = right = first = cursor;
+  if (![left, right, first].every(Number.isFinite)) return;
+  const top = run.codec.ascent * run.size + run.rise,
+    bottom = run.codec.descent * run.size + run.rise;
+  return {
+    quad: [
+      { x: left, y: bottom },
+      { x: right, y: bottom },
+      { x: right, y: top },
+      { x: left, y: top },
+    ].map((point) => transform(run.matrix!, point)),
+    baseline: transform(run.matrix, { x: first, y: run.rise }),
+  };
 }
 
 function findRuns(page: PDFPage, content: string[]): Run[] {
@@ -411,10 +499,20 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
     characterSpacing: 0,
     wordSpacing: 0,
     mode: 0,
+    horizontalScale: 1,
+    rise: 0,
+    leading: 0,
+    ctm: identity(),
   };
   const stack: (typeof state)[] = [];
   const marked: boolean[] = [];
   let inText = false;
+  let textMatrix: Matrix | null = null,
+    lineMatrix: Matrix | null = null;
+  const nextLine = (x: number, y: number) => {
+    lineMatrix = lineMatrix ? multiply(lineMatrix, [1, 0, 0, 1, x, y]) : null;
+    textMatrix = lineMatrix;
+  };
   content.forEach((input, stream) => {
     let tokens: Token[];
     try {
@@ -423,6 +521,8 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
       state = { ...state, font: "", mode: -1 };
       stack.length = 0;
       inText = false;
+      textMatrix = null;
+      lineMatrix = null;
       return;
     }
     let operands: Token[] = [];
@@ -437,6 +537,11 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
       if (token.raw === "q") stack.push({ ...state });
       if (token.raw === "Q")
         state = stack.pop() ?? { ...state, font: "", mode: -1 };
+      if (token.raw === "cm")
+        state.ctm = multiply(
+          state.ctm,
+          operands.slice(-6).map((value) => Number(value.raw)) as Matrix,
+        );
       if (token.raw === "Tf") {
         state.font = operands.at(-2)?.raw ?? "";
         state.size = number();
@@ -444,67 +549,107 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
       if (token.raw === "Tc") state.characterSpacing = number();
       if (token.raw === "Tw") state.wordSpacing = number();
       if (token.raw === "Tr") state.mode = number();
-      if (token.raw === "BT") inText = true;
-      if (token.raw === "ET") inText = false;
+      if (token.raw === "Tz") state.horizontalScale = number() / 100;
+      if (token.raw === "Ts") state.rise = number();
+      if (token.raw === "TL") state.leading = number();
+      if (token.raw === "gs") {
+        const graphics = page.node
+          .Resources()
+          ?.lookupMaybe(name("ExtGState"), PDFDict)
+          ?.lookup(name(operands.at(-1)?.raw.slice(1) ?? ""));
+        if (graphics instanceof PDFDict && graphics.has(name("Font")))
+          state.font = "";
+      }
+      if (token.raw === "BT") {
+        inText = true;
+        textMatrix = identity();
+        lineMatrix = identity();
+      }
+      if (token.raw === "ET") {
+        inText = false;
+        textMatrix = null;
+        lineMatrix = null;
+      }
+      if (token.raw === "Tm") {
+        textMatrix = operands
+          .slice(-6)
+          .map((value) => Number(value.raw)) as Matrix;
+        lineMatrix = textMatrix;
+      }
+      if (token.raw === "Td" || token.raw === "TD") {
+        if (token.raw === "TD") state.leading = -number();
+        nextLine(number(-2), number());
+      }
+      if (token.raw === "T*") nextLine(0, -state.leading);
       if (token.raw === "BMC" || token.raw === "BDC") {
         const property = operands.at(-1);
-        let hasActualText = /\/ActualText\b/.test(property?.raw ?? "");
+        let actual = /\/ActualText\b/.test(property?.raw ?? "");
         if (token.raw === "BDC" && property?.kind === "name") {
-          const properties = page.node
+          const dictionary = page.node
             .Resources()
-            ?.lookupMaybe(name("Properties"), PDFDict);
-          const dictionary = properties?.lookup(name(property.raw.slice(1)));
-          hasActualText =
+            ?.lookupMaybe(name("Properties"), PDFDict)
+            ?.lookup(name(property.raw.slice(1)));
+          actual =
             !(dictionary instanceof PDFDict) ||
             dictionary.has(name("ActualText"));
         }
-        marked.push(token.raw === "BDC" && hasActualText);
+        marked.push(token.raw === "BDC" && actual);
       }
       if (token.raw === "EMC") marked.pop();
-      if (
-        inText &&
-        ["Tj", "TJ"].includes(token.raw) &&
-        [0, 1, 2].includes(state.mode) &&
-        !marked.some(Boolean)
-      ) {
-        const operand = operands.at(-1);
-        const codec = codecs.get(state.font);
-        if (operand && codec) {
-          try {
-            if (
-              (token.raw === "Tj" && operand.kind !== "string") ||
-              (token.raw === "TJ" && operand.kind !== "array")
+      if (inText && ["Tj", "TJ", "'", '"'].includes(token.raw)) {
+        if (token.raw === '"') {
+          state.wordSpacing = number(-3);
+          state.characterSpacing = number(-2);
+        }
+        if (token.raw === '"' || token.raw === "'") nextLine(0, -state.leading);
+        const operand = operands.at(-1),
+          codec = codecs.get(state.font);
+        if (!operand || !codec) {
+          textMatrix = null;
+          operands = [];
+          continue;
+        }
+        try {
+          if (
+            token.raw === "TJ"
+              ? operand.kind !== "array"
+              : operand.kind !== "string"
+          )
+            throw new Error("Invalid text operand");
+          const parts =
+            operand.kind === "array" ? (operand.children ?? []) : [operand];
+          if (
+            parts.some(
+              (part) =>
+                part.kind !== "string" &&
+                !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(part.raw),
             )
-              throw new Error("Invalid text operand");
-            const parts =
-              operand.kind === "array" ? (operand.children ?? []) : [operand];
-            if (
-              parts.some(
-                (part) =>
-                  part.kind !== "string" &&
-                  !/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(part.raw),
-              )
-            )
-              throw new Error("Unsupported text array");
-            const strings = parts.filter((part) => part.kind === "string");
-            const text = strings
+          )
+            throw new Error("Unsupported text array");
+          const advance = parts.reduce(
+            (sum, part) =>
+              sum +
+              (part.kind === "string"
+                ? codec.advance(
+                    part.bytes ?? [],
+                    state.size,
+                    state.characterSpacing,
+                    state.wordSpacing,
+                  )
+                : -Number(part.raw)),
+            0,
+          );
+          if (
+            ["Tj", "TJ"].includes(token.raw) &&
+            [0, 1, 2].includes(state.mode) &&
+            !marked.some(Boolean)
+          ) {
+            const text = parts
+              .filter((part) => part.kind === "string")
               .map((part) => codec.decode(part.bytes ?? []))
               .join("");
-            const advance = parts.reduce(
-              (sum, part) =>
-                sum +
-                (part.kind === "string"
-                  ? codec.advance(
-                      part.bytes ?? [],
-                      state.size,
-                      state.characterSpacing,
-                      state.wordSpacing,
-                    )
-                  : -Number(part.raw)),
-              0,
-            );
-            if (text.trim() && Number.isFinite(advance))
-              runs.push({
+            if (text.trim() && Number.isFinite(advance)) {
+              const run: Run = {
                 id: stream + ":" + operand.start,
                 text,
                 font: codec.name,
@@ -523,10 +668,28 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
                 size: state.size,
                 characterSpacing: state.characterSpacing,
                 wordSpacing: state.wordSpacing,
-              });
-          } catch {
-            /* Leave undecodable text read-only. */
+                matrix: textMatrix
+                  ? multiply(state.ctm, textMatrix)
+                  : undefined,
+                horizontalScale: state.horizontalScale,
+                rise: state.rise,
+                parts,
+              };
+              run.geometry = runGeometry(run);
+              runs.push(run);
+            }
           }
+          if (textMatrix)
+            textMatrix = multiply(textMatrix, [
+              1,
+              0,
+              0,
+              1,
+              (advance * state.size * state.horizontalScale) / 1000,
+              0,
+            ]);
+        } catch {
+          textMatrix = null;
         }
       }
       operands = [];
@@ -538,30 +701,67 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
 export async function inspectEditableText(
   bytes: Uint8Array,
   pageIndex: number,
+  replacements: TextReplacement[] = [],
 ): Promise<EditableRun[]> {
   const doc = await PDFDocument.load(bytes);
   const page = doc.getPage(pageIndex);
-  return findRuns(page, streams(page)).map(
-    ({ id, text, font, characters }) => ({ id, text, font, characters }),
-  );
+  return inspectPageText(page, replacements);
+}
+export function inspectPageText(
+  page: PDFPage,
+  replacements: TextReplacement[] = [],
+): EditableRun[] {
+  return findRuns(page, streams(page)).map((run) => ({
+    id: run.id,
+    text: run.text,
+    font: run.font,
+    characters: run.characters,
+    geometry: runGeometry(
+      run,
+      replacements.find((edit) => edit.runId === run.id)?.replacement,
+    ),
+  }));
 }
 
 /** Rewrite the original text operator, preserving its font, colour and matrix. */
 export function replacePageText(
   page: PDFPage,
   replacements: TextReplacement[],
+  offsets: TextOffset[] = [],
 ) {
-  if (!replacements.length) return;
+  if (!replacements.length && !offsets.length) return;
   const content = streams(page);
   const runs = findRuns(page, content);
   const ids = new Set<string>();
-  const edits = replacements.map((edit) => {
+  const replacementMap = new Map(
+    replacements.map((edit) => [edit.runId, edit]),
+  );
+  const offsetMap = new Map(offsets.map((offset) => [offset.runId, offset]));
+  if (
+    replacementMap.size !== replacements.length ||
+    offsetMap.size !== offsets.length
+  )
+    throw new Error("Duplicate text operation");
+  const edits = [
+    ...new Set([...replacementMap.keys(), ...offsetMap.keys()]),
+  ].map((runId) => {
+    const replacement = replacementMap.get(runId),
+      offset = offsetMap.get(runId);
+    const edit = replacement ?? {
+      runId,
+      original: offset!.original,
+      replacement: offset!.original,
+    };
     if (ids.has(edit.runId)) throw new Error("Duplicate text replacement");
     ids.add(edit.runId);
     const run = runs.find((run) => run.id === edit.runId);
     if (!run || run.text !== edit.original)
       throw new Error(
         "The original text changed. Reopen this page before editing.",
+      );
+    if (offset && offset.original !== run.text)
+      throw new Error(
+        "The original text changed. Reopen this page before moving it.",
       );
     if (/[\r\n]/.test(edit.replacement))
       throw new Error("Use a single line for this text run.");
@@ -575,9 +775,34 @@ export function replacePageText(
         run.wordSpacing,
       ) - run.leading.reduce((sum, value) => sum + Number(value), 0);
     const compensation = Number((newAdvance - run.advance).toFixed(8));
+    let value =
+      edit.replacement === run.text
+        ? content[run.stream].slice(run.start, run.end)
+        : `[${run.leading.join(" ")} ${hex} ${compensation}] TJ`;
+    if (offset && (offset.dx || offset.dy)) {
+      if (
+        ![offset.dx, offset.dy].every(Number.isFinite) ||
+        !run.geometry ||
+        !run.matrix
+      )
+        throw new Error("This text position cannot be moved safely.");
+      const local = inverseVector(run.matrix, { x: offset.dx, y: offset.dy });
+      const adjustment = (-1000 * local.x) / (run.size * run.horizontalScale);
+      const numeric = (value: number) => {
+        if (!Number.isFinite(value) || Math.abs(value) > 1e12)
+          throw new Error("Text movement is out of range.");
+        return Number(value.toFixed(10)).toString();
+      };
+      // TJ shifts only the text cursor, never the line matrix. Ts shifts the
+      // baseline. Restore both after drawing so neighbouring text stays put.
+      // Zero Tc around numeric-only TJ arrays also avoids an extra character
+      // advance in PDF.js text extraction. The original spacing is restored
+      // before the actual glyphs and before the following source operators.
+      value = `${numeric(run.rise + local.y)} Ts 0 Tc [${numeric(adjustment)}] TJ ${numeric(run.characterSpacing)} Tc\n${value}\n0 Tc [${numeric(-adjustment)}] TJ ${numeric(run.characterSpacing)} Tc ${numeric(run.rise)} Ts`;
+    }
     return {
       ...run,
-      value: `[${run.leading.join(" ")} ${hex} ${compensation}] TJ`,
+      value,
     };
   });
   edits

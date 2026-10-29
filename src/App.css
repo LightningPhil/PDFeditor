@@ -733,3 +733,143 @@ footer,
     box-shadow: -10px 0 30px #2342;
   }
 }
+
+.text-box-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  touch-action: none;
+  outline: none;
+}
+.text-hitbox {
+  pointer-events: all;
+  fill: transparent;
+  stroke: #29776855;
+  stroke-width: 0.6;
+  vector-effect: non-scaling-stroke;
+  cursor: move;
+}
+.text-hitbox:hover {
+  fill: #29776810;
+  stroke: #297768;
+}
+.text-hitbox.is-selected {
+  stroke: #187960;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 2;
+  fill: #2977680b;
+}
+.text-hitbox.is-joined {
+  stroke: #29776899;
+}
+.text-box-layer:focus-visible .text-hitbox.is-selected {
+  stroke-width: 2.5;
+}
+.text-group-controls {
+  position: sticky;
+  top: -20px;
+  background: #f5faf7;
+  z-index: 1;
+  border: 1px solid #d7e6dd;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+}
+.text-group-controls > div {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.text-group-controls button {
+  font-size: 10px;
+  padding: 7px;
+}
+.text-group-controls > small {
+  font-size: 10px;
+  line-height: 1.5;
+  color: #718c7c;
+}
+.text-nudge {
+  align-items: center;
+}
+.text-nudge small {
+  font-size: 9px;
+  color: #819187;
+}
+.text-box-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.text-box-heading input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #297768;
+}
+.text-run.selected-box {
+  border-left: 3px solid #297768;
+  padding-left: 9px;
+}
+.text-run label > span {
+  font-size: 10px;
+}
+.text-run label > small {
+  display: block;
+  margin-top: 5px;
+}
+.text-run .text-box-heading small {
+  margin-left: auto;
+  font-size: 9px;
+}
+.text-editor {
+  width: 350px;
+}
+@media (max-width: 900px) {
+  .text-editor {
+    width: 330px;
+  }
+}
+
+.text-box-layer.is-rendering .text-hitbox {
+  pointer-events: none;
+}
+
+@media (max-width: 650px) {
+  .text-editor {
+    left: 99px;
+    right: 0;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    max-width: none;
+    height: 210px;
+    max-height: 38vh;
+    padding: 12px;
+    border-top: 1px solid #c9dbd0;
+    box-shadow: 0 -6px 24px #2342;
+  }
+  .text-editor > .panel-title {
+    margin-bottom: 8px;
+  }
+  .text-editor > p {
+    font-size: 10px;
+    line-height: 1.4;
+    margin: 5px 0;
+  }
+  .text-group-controls {
+    position: static;
+    padding: 8px;
+    margin: 8px 0;
+    gap: 6px;
+  }
+  .text-group-controls > small {
+    display: none;
+  }
+}

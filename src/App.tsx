@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
@@ -24,7 +24,19 @@ import {
 import { exportPdf } from "./pdf";
 import type { Annotation, EditorPage, Source } from "./pdf";
 import { inspectEditableText } from "./text-edit";
-import type { EditableRun, TextReplacement } from "./text-edit";
+import type { EditableRun } from "./text-edit";
+import { OriginalTextEditor } from "./OriginalTextEditor";
+import { TextBoxOverlay } from "./TextBoxOverlay";
+import {
+  getTextBoxes,
+  joinTextBoxes,
+  moveTextBoxes,
+  ungroupTextBoxes,
+} from "./text-boxes";
+import type { TextBox } from "./text-boxes";
+import { identity, inverseVector } from "./geometry";
+import type { Matrix } from "./geometry";
+import { readDocumentTextGroups } from "./text-group-storage";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
@@ -44,6 +56,11 @@ function PageView({
   onAdd,
   onInspect,
   onError,
+  boxes,
+  selected,
+  onSelect,
+  onMoveText,
+  onViewport,
 }: {
   source: LoadedSource;
   page: EditorPage;
@@ -53,11 +70,17 @@ function PageView({
   onAdd: (annotation: Annotation) => void;
   onInspect: (text: string) => void;
   onError: (message: string) => void;
+  boxes: TextBox[];
+  selected: string[];
+  onSelect: (id: string | null, extend?: boolean) => void;
+  onMoveText: (ids: string[], dx: number, dy: number) => void;
+  onViewport: (matrix: Matrix) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
   const [ready, setReady] = useState(false);
   const [supported, setSupported] = useState(false);
+  const [viewport, setViewport] = useState<Matrix>(identity);
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -67,7 +90,7 @@ function PageView({
       | undefined;
     setReady(false);
     void (async () => {
-      if (!page.textReplacements?.length)
+      if (!page.textReplacements?.length && !page.textOffsets?.length)
         return source.document.getPage(page.index + 1);
       const data = await exportPdf([source], [{ ...page, annotations: [] }]);
       if (cancelled) return null;
@@ -84,6 +107,8 @@ function PageView({
       .then(async (pdfPage) => {
         if (cancelled || !canvas.current || !pdfPage) return;
         const view = pdfPage.getViewport({ scale: 1 });
+        setViewport(view.transform as Matrix);
+        onViewport(view.transform as Matrix);
         setSize({ width: view.width, height: view.height });
         // Non-zero crop origins and rotated pages need explicit coordinate conversion.
         setSupported(
@@ -109,7 +134,15 @@ function PageView({
       render?.cancel();
       void previewTask?.destroy();
     };
-  }, [source, page.id, page.index, page.textReplacements, onError]);
+  }, [
+    source,
+    page.id,
+    page.index,
+    page.textReplacements,
+    page.textOffsets,
+    onError,
+    onViewport,
+  ]);
 
   function point(event: PointerEvent<SVGSVGElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -149,6 +182,7 @@ function PageView({
             void inspect();
             return;
           }
+          if (tool === "edit") onSelect(null);
           if (!supported || tool === "select" || tool === "edit") return;
           const p = point(event);
           if (tool === "text" && text.trim())
@@ -209,6 +243,18 @@ function PageView({
           ),
         )}
       </svg>
+      {tool === "edit" && (
+        <TextBoxOverlay
+          disabled={!ready}
+          boxes={boxes}
+          selected={selected}
+          viewport={viewport}
+          width={size.width}
+          height={size.height}
+          onSelect={onSelect}
+          onMove={onMoveText}
+        />
+      )}
       {!supported &&
         tool !== "select" &&
         tool !== "inspect" &&
@@ -218,109 +264,6 @@ function PageView({
           </div>
         )}
     </div>
-  );
-}
-
-function OriginalTextEditor({
-  source,
-  page,
-  onApply,
-  onClose,
-}: {
-  source: Source;
-  page: EditorPage;
-  onApply: (edit: TextReplacement) => void;
-  onClose: () => void;
-}) {
-  const [runs, setRuns] = useState<EditableRun[] | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let cancelled = false;
-    void inspectEditableText(source.bytes, page.index)
-      .then((result) => {
-        if (!cancelled) setRuns(result);
-      })
-      .catch((cause) => {
-        if (!cancelled) setError(String(cause));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [source, page.index]);
-  return (
-    <aside className="inspector text-editor">
-      <div className="panel-title">
-        Edit original text
-        <button aria-label="Close text editor" onClick={onClose}>
-          <X size={17} />
-        </button>
-      </div>
-      <p>
-        Change a supported text run below. The original font, colour and
-        position stay in place. Text does not reflow; keep changes within the
-        available space.
-      </p>
-      {error && (
-        <p role="alert" className="edit-error">
-          {error}
-        </p>
-      )}
-      {runs === null && !error && <p>Reading original text…</p>}
-      {runs?.length === 0 && (
-        <p>
-          No supported original text was found on this page. Scans and some font
-          encodings need further support.
-        </p>
-      )}
-      {runs?.map((run, index) => {
-        const current =
-          page.textReplacements?.find((edit) => edit.runId === run.id)
-            ?.replacement ?? run.text;
-        const draft = drafts[run.id] ?? current;
-        return (
-          <form
-            key={run.id}
-            className="text-run"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const missing = Array.from(draft).find(
-                (character) => !run.characters.includes(character),
-              );
-              if (missing) {
-                setError(
-                  `The original font does not contain “${missing}”. Try other text.`,
-                );
-                return;
-              }
-              setError("");
-              onApply({
-                runId: run.id,
-                original: run.text,
-                replacement: draft,
-              });
-            }}
-          >
-            <label>
-              Text {index + 1}
-              <input
-                aria-label={`Original text ${index + 1}`}
-                value={draft}
-                maxLength={1000}
-                onChange={(event) =>
-                  setDrafts((previous) => ({
-                    ...previous,
-                    [run.id]: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <small title={run.font}>{run.font}</small>
-            <button disabled={draft === current}>Apply change</button>
-          </form>
-        );
-      })}
-    </aside>
   );
 }
 
@@ -351,6 +294,90 @@ export default function App() {
   const active = pages.find((page) => page.id === activeId) ?? pages[0];
   const source = sources.find((item) => item.id === active?.sourceId);
   const activeIndex = pages.findIndex((page) => page.id === active?.id);
+  const [pageViewport, setPageViewport] = useState<Matrix>(identity);
+  const publishViewport = useCallback(
+    (matrix: Matrix) => setPageViewport(matrix),
+    [],
+  );
+  const [runState, setRunState] = useState<{
+    pageId: string;
+    runs: EditableRun[];
+  }>({ pageId: "", runs: [] });
+  const [readingText, setReadingText] = useState(false);
+  const [selection, setSelection] = useState<{ pageId: string; ids: string[] }>(
+    { pageId: "", ids: [] },
+  );
+  const runs = runState.pageId === active?.id ? runState.runs : [];
+  const boxes = active ? getTextBoxes(active, runs) : [];
+  const selected =
+    selection.pageId === active?.id
+      ? selection.ids.filter((id) => boxes.some((box) => box.id === id))
+      : [];
+  useEffect(() => {
+    if (!active || !source) return;
+    let cancelled = false;
+    setReadingText(true);
+    void inspectEditableText(
+      source.bytes,
+      active.index,
+      active.textReplacements,
+    )
+      .then((runs) => {
+        if (!cancelled) setRunState({ pageId: active.id, runs });
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(String(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setReadingText(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active?.id, active?.index, active?.textReplacements, source]);
+  function selectText(id: string | null, extend = false) {
+    if (!active) return;
+    setSelection({
+      pageId: active.id,
+      ids:
+        id === null
+          ? []
+          : extend
+            ? selected.includes(id)
+              ? selected.filter((value) => value !== id)
+              : [...selected, id]
+            : [id],
+    });
+  }
+  function moveText(ids: string[], dx: number, dy: number) {
+    if (!active) return;
+    try {
+      const next = moveTextBoxes(active, runs, ids, dx, dy);
+      commit(pages.map((page) => (page.id === active.id ? next : page)));
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+  function joinText() {
+    if (!active) return;
+    try {
+      const id = `joined:${uid()}`;
+      const next = joinTextBoxes(active, runs, selected, id);
+      commit(pages.map((page) => (page.id === active.id ? next : page)));
+      setSelection({ pageId: active.id, ids: [id] });
+    } catch (cause) {
+      setError(String(cause));
+    }
+  }
+  function ungroupText() {
+    if (!active) return;
+    const members = boxes
+      .filter((box) => selected.includes(box.id))
+      .flatMap((box) => box.runs.map((run) => run.id));
+    const next = ungroupTextBoxes(active, selected);
+    commit(pages.map((page) => (page.id === active.id ? next : page)));
+    setSelection({ pageId: active.id, ids: members });
+  }
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (pages.length) event.preventDefault();
@@ -383,10 +410,17 @@ export default function App() {
         });
         tasks.current.push(task);
         const document = await task.promise;
+        const groups = await readDocumentTextGroups(bytes);
         const item = { id: uid(), name: file.name, bytes, document, task };
         loaded.push(item);
         for (let index = 0; index < document.numPages; index++)
-          added.push({ id: uid(), sourceId: item.id, index, annotations: [] });
+          added.push({
+            id: uid(),
+            sourceId: item.id,
+            index,
+            annotations: [],
+            textGroups: groups[index] ?? [],
+          });
       }
       if (!added.length) throw new Error("This PDF has no pages.");
       setSources((previous) => [...previous, ...loaded]);
@@ -723,6 +757,11 @@ export default function App() {
                     tool={busy ? "select" : tool}
                     color={color}
                     text={text}
+                    boxes={boxes}
+                    selected={selected}
+                    onSelect={selectText}
+                    onMoveText={moveText}
+                    onViewport={publishViewport}
                     onAdd={(annotation) =>
                       commit(
                         pages.map((page) =>
@@ -759,20 +798,45 @@ export default function App() {
         {tool === "edit" && active && source && (
           <OriginalTextEditor
             key={active.id}
-            source={source}
             page={active}
+            boxes={boxes}
+            loading={readingText}
+            error=""
+            selected={selected}
+            onSelect={selectText}
+            onJoin={joinText}
+            onUngroup={ungroupText}
+            onMove={(ids, dx, dy) => {
+              const delta = inverseVector(pageViewport, { x: dx, y: -dy });
+              moveText(ids, delta.x, delta.y);
+            }}
             onClose={() => setTool("select")}
-            onApply={(edit) =>
+            onApply={(edits) =>
               commit(
                 pages.map((page) =>
                   page.id === active.id
                     ? {
                         ...page,
+                        annotations: page.annotations.map((annotation) => {
+                          const edit = edits.find(
+                            (edit) => edit.runId === `added:${annotation.id}`,
+                          );
+                          return edit && annotation.kind === "text"
+                            ? { ...annotation, text: edit.replacement }
+                            : annotation;
+                        }),
                         textReplacements: [
                           ...(page.textReplacements ?? []).filter(
-                            (existing) => existing.runId !== edit.runId,
+                            (existing) =>
+                              !edits.some(
+                                (edit) => edit.runId === existing.runId,
+                              ),
                           ),
-                          ...(edit.replacement === edit.original ? [] : [edit]),
+                          ...edits.filter(
+                            (edit) =>
+                              !edit.runId.startsWith("added:") &&
+                              edit.replacement !== edit.original,
+                          ),
                         ],
                       }
                     : page,

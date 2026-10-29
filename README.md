@@ -32,6 +32,31 @@ not change the originals. Imported sources remain in memory to support undo.
 Choose **Edit text**, change a text run in the side panel, then **Apply change**.
 The page preview updates; edits participate in undo/redo and PDF export.
 
+## Move and join text boxes
+
+In **Edit text**, drag a box on the page to reposition its text. Shift-click boxes
+or tick their side-panel checkboxes to select several, then choose **Join boxes**.
+The joined selection has one outline and moves as a unit. **Ungroup** separates
+it again without changing its position. Arrow keys move a selected box by one
+point, or ten with Shift; the panel also has one-point nudge buttons. Original
+text and newly added text can be grouped together.
+
+Joining is structural: each piece keeps its exact original glyph commands, font,
+colour, baseline, kerning and relative position. It does not concatenate and
+re-typeset the text. The inspector retains an input for each styled piece inside
+the joined box; there is no automatic paragraph reflow. Edits, moves, joins and
+ungrouping participate in undo/redo.
+
+Movement converts the requested page displacement into the run's text space,
+temporarily shifts its cursor and rise, then restores them. This preserves the
+line matrix and the starting positions of following, unselected text, including
+rotated/skewed text, page rotation, cropping, scaling and text rise.
+
+Exports retain grouping in a private page dictionary (`PDFeditorTextGroups`).
+Reopening the exported PDF in PDFeditor restores the joined boxes, including
+previously added text. Other viewers ignore the metadata and display the same
+standard PDF text drawing operations. Export does not rasterise text.
+
 The custom content-stream editor in `src/text-edit.ts` rewrites the original
 `Tj`/`TJ` drawing command. It does not cover text with rectangles or rasterise
 the page. Original font resources, text matrices and colours are retained.
@@ -77,6 +102,12 @@ the same line, and checks the resulting image with OCR again. It is a constraine
 proof for a single-image page, not an interactive OCR feature or general scan editor.
 It preserves the scan's dimensions and annotations and drops the replaced image
 from the copied document. OCR downloads language data; documents are not uploaded.
+
+`scripts/verify-text-layout.ts` tests joins, movement, PDF grouping metadata and
+reversible placement against all local text samples. It compares rendered pixels
+before/after joining and after restoring a move. `src/text-layout.test.ts` also
+checks mixed fonts, existing edits/offsets, kerning, neighbouring text, added text,
+page rotation, crop boxes, user units, skew and export/reimport.
 
 ## Current limits
 
