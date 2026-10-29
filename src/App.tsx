@@ -21,7 +21,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { exportPdf } from "./pdf";
+import { exportPdf, exportPagePreview } from "./pdf";
 import type { Annotation, EditorPage, Source } from "./pdf";
 import { inspectEditableText } from "./text-edit";
 import type { EditableRun } from "./text-edit";
@@ -101,7 +101,7 @@ function PageView({
     void (async () => {
       if (!page.textReplacements?.length && !page.textOffsets?.length)
         return source.document.getPage(page.index + 1);
-      const data = await exportPdf([source], [{ ...page, annotations: [] }]);
+      const data = await exportPagePreview(source, page);
       if (cancelled) return null;
       previewTask = getDocument({
         data,

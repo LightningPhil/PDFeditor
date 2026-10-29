@@ -32,6 +32,29 @@ const run = (id: string, x = 0, y = 100): EditableRun => ({
   },
 });
 describe("join invariants", () => {
+  it("rejects an overflowing mixed-group movement atomically", () => {
+    const runs = [run("0:1")];
+    const source = {
+      ...page(),
+      annotations: [
+        {
+          id: "note",
+          kind: "text" as const,
+          text: "Note",
+          x: 9e307,
+          y: 100,
+          size: 12,
+          color: "#297768",
+        },
+      ],
+    };
+    const joined = joinTextBoxes(source, runs, ["0:1", "added:note"], "group");
+    const snapshot = JSON.stringify(joined);
+    expect(() => moveTextBoxes(joined, runs, ["group"], 9e307, 0)).toThrow(
+      "out of range",
+    );
+    expect(JSON.stringify(joined)).toBe(snapshot);
+  });
   it("retains source ordering when merging an interleaved group with its neighbour", () => {
     const runs = ["0:1", "0:2", "0:3", "0:4"].map((id, i) => run(id, i * 10));
     const first = joinTextBoxes(page(), runs, ["0:1", "0:3"], "first");

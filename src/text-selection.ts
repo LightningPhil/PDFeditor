@@ -59,6 +59,34 @@ export function pointInPolygon(point: Point, quad: Point[]): boolean {
   }
   return !(positive && negative);
 }
+/** Text wins over a group's empty outline; return stacked targets top first. */
+export function boxesAtPoint(
+  boxes: TextBox[],
+  viewport: Matrix,
+  point: Point,
+): string[] {
+  return boxes
+    .filter(
+      (box) =>
+        box.movable &&
+        box.pieces.some((piece) =>
+          pointInPolygon(
+            point,
+            piece.quad.map((p) => transform(viewport, p)),
+          ),
+        ),
+    )
+    .map((box) => box.id)
+    .reverse();
+}
+export function cycleTextTarget(
+  hits: string[],
+  selected: string[],
+): string | undefined {
+  if (!hits.length) return;
+  const index = selected.length === 1 ? hits.indexOf(selected[0]) : -1;
+  return hits[(index + 1) % hits.length];
+}
 function intersects(quad: Point[], rect: Rectangle): boolean {
   const inside = (point: Point) =>
     point.x >= rect.x &&

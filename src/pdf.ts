@@ -24,6 +24,11 @@ export interface EditorPage {
   textGroups?: TextGroup[];
 }
 
+/** Annotations render in a separate SVG layer; grouping never affects pixels. */
+export function exportPagePreview(source: Source, page: EditorPage) {
+  return exportPdf([source], [{ ...page, annotations: [], textGroups: [] }]);
+}
+
 /** Copy pages without rasterising their original text or graphics. */
 export async function exportPdf(sources: Source[], pages: EditorPage[]) {
   if (!pages.length) throw new Error("Add at least one page before exporting.");
@@ -53,11 +58,15 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
         .filter((annotation) => annotation.kind === "text")
         .map((annotation) => `added:${annotation.id}`),
     ]);
+    const replacements = new Map(
+      (item.textReplacements ?? []).map((edit) => [
+        edit.runId,
+        edit.replacement,
+      ]),
+    );
     const expected = item.textGroups?.length
       ? sourceRuns.flatMap((run) => {
-          const text =
-            item.textReplacements?.find((edit) => edit.runId === run.id)
-              ?.replacement ?? run.text;
+          const text = replacements.get(run.id) ?? run.text;
           return text.trim() ? [{ id: run.id, text, font: run.font }] : [];
         })
       : [];

@@ -6,6 +6,8 @@ import type { EditorPage } from "./pdf";
 import { getTextBoxes, joinTextBoxes } from "./text-boxes";
 import {
   boxesInRectangle,
+  boxesAtPoint,
+  cycleTextTarget,
   neighbouringLine,
   pointInPolygon,
   selectedTextBoxIds,
@@ -37,6 +39,25 @@ function run(
   };
 }
 describe("precise text selection", () => {
+  it("prioritises actual text over a later group's outline and cycles overlapping boxes", () => {
+    const runs = [
+      run("0:1", 20, 100),
+      run("0:2", 10, 100),
+      run("0:3", 40, 100),
+      run("0:4", 20, 100),
+    ];
+    const model = joinTextBoxes(page, runs, ["0:2", "0:3"], "surrounding");
+    const boxes = getTextBoxes(model, runs);
+    expect(boxesAtPoint(boxes, identity(), { x: 23, y: 100 })).toEqual([
+      "0:4",
+      "0:1",
+    ]);
+    expect(cycleTextTarget(["0:4", "0:1"], [])).toBe("0:4");
+    expect(cycleTextTarget(["0:4", "0:1"], ["0:4"])).toBe("0:1");
+    expect(cycleTextTarget(["0:4", "0:1"], ["0:1"])).toBe("0:4");
+    expect(cycleTextTarget(["0:4", "0:1"], ["missing"])).toBe("0:4");
+    expect(cycleTextTarget([], [])).toBeUndefined();
+  });
   it("preserves selection across join, split and history traversal", () => {
     const runs = [
       run("0:1", 10, 100),

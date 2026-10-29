@@ -5,7 +5,7 @@ import { PDFDocument, PDFName, StandardFonts, degrees } from "pdf-lib";
 import { createCanvas } from "@napi-rs/canvas";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { fileURLToPath } from "node:url";
-import { exportPdf } from "./pdf";
+import { exportPdf, exportPagePreview } from "./pdf";
 import type { EditorPage } from "./pdf";
 import { inspectEditableText } from "./text-edit";
 import {
@@ -91,6 +91,77 @@ async function inspect(bytes: Uint8Array) {
 }
 
 describe("joining and moving original text", () => {
+  for (const variant of ["plain", "transformed", "rotated", "page-rotation"]) {
+    it(`can edit, split, rejoin and move a reopened mixed group repeatedly (${variant})`, async () => {
+      const original = await fixture(variant),
+        originalRuns = await inspectEditableText(original, 0);
+      const base = model();
+      base.annotations = [
+        {
+          id: "note",
+          kind: "text",
+          text: "Note",
+          x: 170,
+          y: 350,
+          size: 14,
+          color: "#297768",
+        },
+      ];
+      let current = await exported(
+        original,
+        joinTextBoxes(
+          base,
+          originalRuns,
+          [originalRuns[0].id, originalRuns[1].id, "added:note"],
+          "group",
+        ),
+      );
+      for (let cycle = 1; cycle <= 6; cycle++) {
+        const runs = await inspectEditableText(current, 0);
+        const groups = (await readDocumentTextGroups(current))[0];
+        expect(groups).toHaveLength(1);
+        const replacement = cycle % 2 ? "Gamma" : "Delta";
+        let imported: EditorPage = {
+          ...model(),
+          textGroups: groups,
+          textReplacements: [
+            { runId: runs[0].id, original: runs[0].text, replacement },
+          ],
+        };
+        imported = ungroupTextBoxes(imported, ["group"]);
+        imported = joinTextBoxes(imported, runs, groups[0].runIds, "group");
+        imported = moveTextBoxes(imported, runs, ["group"], 3.25, -2.5);
+        const next = await exported(current, imported);
+        let expected: EditorPage = {
+          ...base,
+          textReplacements: [
+            {
+              runId: originalRuns[0].id,
+              original: originalRuns[0].text,
+              replacement,
+            },
+          ],
+        };
+        expected = joinTextBoxes(
+          expected,
+          originalRuns,
+          [originalRuns[0].id, originalRuns[1].id, "added:note"],
+          "group",
+        );
+        expected = moveTextBoxes(
+          expected,
+          originalRuns,
+          ["group"],
+          3.25 * cycle,
+          -2.5 * cycle,
+        );
+        const actualPixels = await inspect(next),
+          expectedPixels = await inspect(await exported(original, expected));
+        expect(actualPixels.hash, `cycle ${cycle}`).toBe(expectedPixels.hash);
+        current = next;
+      }
+    });
+  }
   it("retains a joined box after export, reimport and another export, including mixed added text", async () => {
     const bytes = await fixture(),
       runs = await inspectEditableText(bytes, 0),
@@ -249,6 +320,31 @@ describe("joining and moving original text", () => {
       (await inspect(await exported(bytes, page))).hash,
     );
     const moved = moveTextBoxes(joined, runs, ["mixed"], 10, 6);
+    const preview = await exportPagePreview(
+      { id: "source", name: "fixture.pdf", bytes },
+      moved,
+    );
+    const previewText = await inspectEditableText(preview, 0);
+    expect(previewText.map((run) => run.text)).toEqual([
+      "Alpha",
+      "Beta",
+      "Unmoved",
+    ]);
+    expect(await readDocumentTextGroups(preview)).toEqual([[]]);
+    const previewPixels = await inspect(preview);
+    expect(previewPixels.items.some((item) => item.str.includes("Note"))).toBe(
+      false,
+    );
+    expect(
+      previewText[0].geometry!.baseline.x - runs[0].geometry!.baseline.x,
+    ).toBeCloseTo(10, 6);
+    expect(
+      previewText[0].geometry!.baseline.y - runs[0].geometry!.baseline.y,
+    ).toBeCloseTo(6, 6);
+    // The live preview must not strip membership from the final saved document.
+    expect(
+      (await readDocumentTextGroups(await exported(bytes, moved)))[0][0].runIds,
+    ).toHaveLength(2);
     expect(moved.annotations[0]).toMatchObject({
       x: 185,
       y: 356,

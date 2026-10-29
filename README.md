@@ -65,9 +65,15 @@ Group membership is disjoint and follows the original source ordering, even
 after merging interleaved groups. Stale selections and conflicting identifiers
 are rejected; damaged groups cannot cause a piece to move twice. A joined outline
 does not intercept clicks or drag-selection on unrelated text in its empty interior.
+Actual text also takes priority over a joined outline; Alt-click cycles through
+overlapping boxes so covered text can still be selected.
 Pending text changes must be applied or discarded before joining, and undo updates
 both the rendered page and editor fields. Selection follows the constituent pieces
 through joins, splits and undo/redo.
+
+Live previews render native edits independently of the annotation layer and group
+metadata. Mixed groups containing original and added text can be moved and edited
+without dropping their added pieces or interrupting rendering.
 
 Current group metadata is version 2, stored as Unicode-safe PDF strings. It
 records text/font/position anchors as well as a content stamp. Unchanged exports

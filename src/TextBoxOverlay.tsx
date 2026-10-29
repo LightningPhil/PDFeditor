@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { bounds, inverseVector, transform } from "./geometry";
 import type { Matrix, Point } from "./geometry";
 import type { TextBox } from "./text-boxes";
-import { boxesInRectangle } from "./text-selection";
+import {
+  boxesInRectangle,
+  boxesAtPoint,
+  cycleTextTarget,
+} from "./text-selection";
 import type { Rectangle } from "./text-selection";
 import type { PointerEvent } from "react";
 
@@ -180,12 +184,20 @@ export function TextBoxOverlay({
                 event.preventDefault();
                 event.stopPropagation();
                 svg.current?.focus({ preventScroll: true });
-                if (event.shiftKey || event.ctrlKey || event.metaKey) {
-                  onSelect(box.id, true);
+                const hits = boxesAtPoint(boxes, viewport, point(event));
+                const target =
+                  (event.altKey ? cycleTextTarget(hits, selected) : hits[0]) ??
+                  box.id;
+                if (event.altKey) {
+                  onSelect(target);
                   return;
                 }
-                const ids = isSelected ? selected : [box.id];
-                if (!isSelected) onSelect(box.id);
+                if (event.shiftKey || event.ctrlKey || event.metaKey) {
+                  onSelect(target, true);
+                  return;
+                }
+                const ids = selectedIds.has(target) ? selected : [target];
+                if (!selectedIds.has(target)) onSelect(target);
                 gesture.current = {
                   kind: "move",
                   ids,

@@ -304,10 +304,14 @@ export function moveTextBoxes(
   return {
     ...page,
     textOffsets: [...offsets.values()],
-    annotations: page.annotations.map((annotation) =>
-      annotation.kind === "text" && addedIds.has(annotation.id)
-        ? { ...annotation, x: annotation.x + dx, y: annotation.y + dy }
-        : annotation,
-    ),
+    annotations: page.annotations.map((annotation) => {
+      if (annotation.kind !== "text" || !addedIds.has(annotation.id))
+        return annotation;
+      const x = annotation.x + dx,
+        y = annotation.y + dy;
+      if (![x, y].every(Number.isFinite))
+        throw new Error("Text movement is out of range.");
+      return { ...annotation, x, y };
+    }),
   };
 }

@@ -128,7 +128,8 @@ export function OriginalTextEditor({
       <fieldset className="text-editor-controls" disabled={busy}>
         <p>
           Drag text or its outline to move it. Drag empty page space to select
-          several boxes, or select one and choose Select line.
+          several boxes, or select one and choose Select line. Alt-click cycles
+          through overlapping boxes.
         </p>
         <div className="text-group-controls">
           <span>
