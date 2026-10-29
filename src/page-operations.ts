@@ -1,4 +1,21 @@
 import type { EditorPage } from "./pdf";
+/** Position is an insertion boundary in the original list: 0 = start, length = end. */
+export function movePagesTo(
+  pages: EditorPage[],
+  ids: string[],
+  position: number,
+): EditorPage[] {
+  if (!Number.isInteger(position) || position < 0 || position > pages.length)
+    throw new Error("Choose a position inside this document.");
+  const chosen = new Set(ids),
+    moving = pages.filter((p) => chosen.has(p.id));
+  if (!moving.length) return pages;
+  const rest = pages.filter((p) => !chosen.has(p.id));
+  const boundary = pages
+    .slice(0, position)
+    .filter((p) => !chosen.has(p.id)).length;
+  return [...rest.slice(0, boundary), ...moving, ...rest.slice(boundary)];
+}
 export function reorderPages(
   pages: EditorPage[],
   ids: string[],

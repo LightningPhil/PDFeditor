@@ -518,6 +518,11 @@ export default function App() {
     }
   });
   const input = useRef<HTMLInputElement>(null);
+  const inputInsertion = useRef<number | undefined>(undefined);
+  function chooseFiles(position?: number) {
+    inputInsertion.current = position;
+    input.current?.click();
+  }
   const busyRef = useRef(false);
   const tasks = useRef<PDFDocumentLoadingTask[]>([]);
   function applyRecovered(snapshot: SessionSnapshot, loaded: LoadedSource[]) {
@@ -1058,12 +1063,13 @@ export default function App() {
       setBusy(false);
     }
   }
-  async function importFiles(files: File[]) {
+  async function importFiles(files: File[], position?: number) {
     if (!files.length || busyRef.current || !hydrated) return;
     busyRef.current = true;
     setBusy(true);
     setError("");
     const loaded: LoadedSource[] = [];
+    const opening: PDFDocumentLoadingTask[] = [];
     try {
       const added: EditorPage[] = [];
       for (const file of files) {
@@ -1078,6 +1084,7 @@ export default function App() {
           wasmUrl: "/pdfjs/wasm/",
         });
         tasks.current.push(task);
+        opening.push(task);
         const document = await task.promise;
         const groups = await readDocumentTextGroups(bytes);
         const paragraphs = await readDocumentParagraphs(bytes, groups);
@@ -1100,17 +1107,23 @@ export default function App() {
       setBaseline((previous) => [...previous, ...added]);
       setRecovery(null);
       setShowOriginal(false);
-      const insertion = active ? activeIndex + 1 : pages.length;
+      const insertion = Math.max(
+        0,
+        Math.min(
+          pages.length,
+          position ?? (active ? activeIndex + 1 : pages.length),
+        ),
+      );
       commit([
         ...pages.slice(0, insertion),
         ...added,
         ...pages.slice(insertion),
       ]);
       setActiveId(added[0].id);
+      if (files.length > 1) setDialog("pages");
     } catch (cause) {
-      loaded.forEach((item) => {
-        void item.task.destroy();
-      });
+      opening.forEach((task) => void task.destroy());
+      tasks.current = tasks.current.filter((task) => !opening.includes(task));
       setError(
         `Could not open PDF: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
@@ -1205,7 +1218,9 @@ export default function App() {
         multiple
         hidden
         onChange={(event) => {
-          void importFiles(Array.from(event.target.files ?? []));
+          const position = inputInsertion.current;
+          inputInsertion.current = undefined;
+          void importFiles(Array.from(event.target.files ?? []), position);
         }}
       />
       <header>
@@ -1313,10 +1328,17 @@ export default function App() {
           <button
             className="insert"
             disabled={busy}
-            onClick={() => input.current?.click()}
+            onClick={() => chooseFiles()}
           >
             <Plus size={16} />{" "}
-            {pages.length ? "Insert PDF after page" : "Open a PDF"}
+            {pages.length ? "Add PDFs after this page" : "Open PDF files"}
+          </button>
+          <button
+            className="insert"
+            disabled={busy}
+            onClick={() => setDialog("pages")}
+          >
+            Combine & organise
           </button>
           {!pages.length && (
             <div className="empty-pages">
@@ -1397,7 +1419,7 @@ export default function App() {
                 Find & replace
               </button>
               <button disabled={busy} onClick={() => setDialog("pages")}>
-                Organise pages
+                Combine & organise
               </button>
               <button disabled={busy} onClick={() => setDialog("review")}>
                 Review changes
@@ -1650,7 +1672,7 @@ export default function App() {
                 <button
                   className="drop-zone"
                   disabled={busy}
-                  onClick={() => input.current?.click()}
+                  onClick={() => chooseFiles()}
                 >
                   <span className="upload-icon">
                     <Upload size={27} />
@@ -2004,9 +2026,13 @@ export default function App() {
         <PageOrganizer
           pages={pages}
           sources={sources}
+          busy={busy}
+          importError={error}
           onChange={commit}
           onOpen={setActiveId}
-          onInsert={() => input.current?.click()}
+          onInsert={chooseFiles}
+          onFiles={(files, position) => void importFiles(files, position)}
+          onExport={() => setDialog("export")}
           onExtract={async (chosen) => {
             await download(chosen, "extracted-pages.pdf");
           }}

@@ -87,6 +87,26 @@ a shareable PDF and does not change source files. Clearing browser site data
 removes recovery copies. New workspace saves the current session before starting
 fresh; the recovery banner can restore or delete the previous local copy.
 
+## Combine PDFs and organise pages
+
+Open **Combine & organise** from the sidebar or document toolbar. **Add PDF files**
+accepts multiple files at once. Choose **Insert / move to** to add them at the
+beginning, end or before a particular page. You can also drop PDFs directly onto
+a thumbnail to insert them before that page, or onto the end drop area to append.
+Opening several PDFs together automatically opens this organiser.
+
+Select individual thumbnails, a page range in the final document, or all pages
+from one source file. Drag a page grip to move the selection together, use
+**Move selected here** for a precise position, or move it to the beginning/end.
+Pages retain their source filename and original page number in the grid. Remove,
+duplicate, rotate or extract the selection as needed. Closing the organiser gives
+access to Undo/Redo for these changes, including imports and removal of all pages.
+
+**Export combined PDF** opens the export dialog, with `combined.pdf` as the default
+name when pages from several sources are present. Leave the range empty to export
+every remaining page in the displayed order. Source files are never overwritten;
+native text and existing edits remain editable in the combined PDF.
+
 ## Paragraphs and formatting
 
 Select text in **Edit text**, open **Paragraph & font formatting**, edit the text

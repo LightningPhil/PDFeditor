@@ -8,6 +8,8 @@ import {
 } from "pdf-lib";
 import { exportPdf } from "./pdf";
 import type { EditorPage, Source } from "./pdf";
+import { movePagesTo, duplicatePages } from "./page-operations";
+import { inspectEditableText } from "./text-edit";
 
 async function fixture(): Promise<Source> {
   const pdf = await PDFDocument.create();
@@ -28,6 +30,63 @@ const page = (id: string, index: number): EditorPage => ({
 });
 
 describe("PDF export", () => {
+  it("exports one final document after cross-file moves, removals, duplication and text editing", async () => {
+    const first = await fixture(),
+      other = await PDFDocument.create(),
+      font = await other.embedFont(StandardFonts.Helvetica);
+    for (let n = 1; n <= 3; n++)
+      other
+        .addPage([300 + n * 10, 400])
+        .drawText(`File B page ${n}`, { font, size: 12 });
+    const second: Source = {
+        id: "second",
+        name: "second.pdf",
+        bytes: await other.save(),
+      },
+      originals = [first.bytes.slice(), second.bytes.slice()];
+    let pages = [
+      page("a1", 0),
+      page("a2", 1),
+      ...[0, 1, 2].map((index) => ({
+        ...page(`b${index + 1}`, index),
+        sourceId: second.id,
+      })),
+    ];
+    pages = movePagesTo(pages, ["a2", "b3"], 0).filter(
+      (p) => !["a1", "b1"].includes(p.id),
+    );
+    pages = duplicatePages(pages, ["b3"], () => "b-copy");
+    const run = (await inspectEditableText(first.bytes, 1))[0];
+    pages[0] = {
+      ...pages[0],
+      textReplacements: [
+        {
+          runId: run.id,
+          original: run.text,
+          replacement: "Edited page from file A",
+        },
+      ],
+    };
+    const output = await exportPdf([first, second], pages),
+      reopened = await PDFDocument.load(output);
+    expect(reopened.getPageCount()).toBe(4);
+    expect(reopened.getPages().map((p) => p.getWidth())).toEqual([
+      500, 330, 330, 320,
+    ]);
+    const text = [];
+    for (let i = 0; i < 4; i++)
+      text.push(
+        (await inspectEditableText(output, i)).map((r) => r.text).join(" "),
+      );
+    expect(text).toEqual([
+      "Edited page from file A",
+      "File B page 3",
+      "File B page 3",
+      "File B page 2",
+    ]);
+    expect(first.bytes).toEqual(originals[0]);
+    expect(second.bytes).toEqual(originals[1]);
+  });
   it("reorders, omits and repeats pages without changing the source", async () => {
     const source = await fixture();
     const original = source.bytes.slice();

@@ -17,6 +17,7 @@ import {
   reorderPages,
   rotatePages,
   documentChanges,
+  movePagesTo,
 } from "./page-operations";
 import { findText, replacementEdits } from "./search";
 import { alignText, snapTextMove } from "./text-alignment";
@@ -55,6 +56,40 @@ const run = (id: string, text: string, x: number, y = 400): EditableRun => ({
   },
 });
 describe("workspace editing", () => {
+  it("moves discontiguous pages to exact original boundaries, including the end", () => {
+    const pages = [model("a"), model("b"), model("c"), model("d"), model("e")];
+    expect(movePagesTo(pages, ["b", "d"], 5).map((p) => p.id)).toEqual([
+      "a",
+      "c",
+      "e",
+      "b",
+      "d",
+    ]);
+    expect(movePagesTo(pages, ["b", "d"], 3).map((p) => p.id)).toEqual([
+      "a",
+      "c",
+      "b",
+      "d",
+      "e",
+    ]);
+    expect(movePagesTo(pages, ["d", "b"], 0).map((p) => p.id)).toEqual([
+      "b",
+      "d",
+      "a",
+      "c",
+      "e",
+    ]);
+    expect(
+      movePagesTo(
+        pages,
+        pages.map((p) => p.id),
+        2,
+      ),
+    ).toEqual(pages);
+    expect(movePagesTo(pages, [], 0)).toBe(pages);
+    expect(() => movePagesTo(pages, ["b"], 6)).toThrow("position");
+    expect(pages.map((p) => p.id)).toEqual(["a", "b", "c", "d", "e"]);
+  });
   for (const font of textFonts)
     it(`exports native formatted text in ${font} and keeps its group`, async () => {
       const doc = await PDFDocument.create();

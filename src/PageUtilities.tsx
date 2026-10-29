@@ -31,7 +31,10 @@ export function PageUtilities({
   const [tab, setTab] = useState<"numbers" | "headers" | "crop">("numbers"),
     [range, setRange] = useState(""),
     [filename, setFilename] = useState(
-      (sources[0]?.name.replace(/\.pdf$/i, "") ?? "document") + "-edited.pdf",
+      new Set(pages.map((p) => p.sourceId)).size > 1
+        ? "combined.pdf"
+        : (sources[0]?.name.replace(/\.pdf$/i, "") ?? "document") +
+            "-edited.pdf",
     ),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
