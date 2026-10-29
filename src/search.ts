@@ -1,6 +1,6 @@
 import type { EditableRun, TextReplacement } from "./text-edit";
 import type { EditorPage } from "./pdf";
-import { getAllTextRuns } from "./text-boxes";
+import { getAllTextRuns, getTextBoxes } from "./text-boxes";
 import { bounds } from "./geometry";
 export interface TextSegment {
   run: EditableRun;
@@ -23,9 +23,24 @@ export function indexedText(
     (page.textReplacements ?? []).map((e) => [e.runId, e.replacement]),
   );
   const segments: TextSegment[] = [];
+  const positions = new Map(
+    getTextBoxes(page, runs).flatMap((box) =>
+      box.pieces.map(
+        (piece) =>
+          [
+            piece.runId,
+            { quad: piece.quad, baseline: piece.baseline },
+          ] as const,
+      ),
+    ),
+  );
   let text = "",
     previous: EditableRun | undefined;
-  for (const run of getAllTextRuns(page, runs)) {
+  for (const sourceRun of getAllTextRuns(page, runs)) {
+    const run = {
+      ...sourceRun,
+      geometry: positions.get(sourceRun.id) ?? sourceRun.geometry,
+    };
     const value = values.get(run.id) ?? run.text;
     if (!value) continue;
     if (

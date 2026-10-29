@@ -94,7 +94,7 @@ export function planReferenceAlignment(
   if (
     !moving.length ||
     moving.length !== wanted.size ||
-    moving.some((box) => !box.movable)
+    moving.some((box) => !box.movable || box.locked)
   )
     throw new Error("Select the text boxes to move.");
   const refRuns = new Set(references.runIds),

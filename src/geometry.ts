@@ -4,6 +4,18 @@ export interface Point {
 }
 export type Matrix = [number, number, number, number, number, number];
 export const identity = (): Matrix => [1, 0, 0, 1, 0, 0];
+export function inverse(matrix: Matrix): Matrix {
+  const x = inverseVector(matrix, { x: 1, y: 0 }),
+    y = inverseVector(matrix, { x: 0, y: 1 });
+  return [
+    x.x,
+    x.y,
+    y.x,
+    y.y,
+    -x.x * matrix[4] - y.x * matrix[5],
+    -x.y * matrix[4] - y.y * matrix[5],
+  ];
+}
 export function multiply(a: Matrix, b: Matrix): Matrix {
   return [
     a[0] * b[0] + a[2] * b[1],

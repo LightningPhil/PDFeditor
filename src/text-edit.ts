@@ -10,7 +10,13 @@ import {
 } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
 import { Font, FontNames, Encodings } from "@pdf-lib/standard-fonts";
-import { identity, multiply, transform, inverseVector } from "./geometry";
+import {
+  identity,
+  multiply,
+  transform,
+  inverseVector,
+  inverse,
+} from "./geometry";
 import type { Matrix, Point } from "./geometry";
 
 export interface TextReplacement {
@@ -31,6 +37,17 @@ export interface TextOffset {
   original: string;
   dx: number;
   dy: number;
+}
+export interface TextTransform {
+  runId: string;
+  original: string;
+  matrix: Matrix;
+}
+export interface TextCopy {
+  id: string;
+  sourceRunId: string;
+  sourceOriginal: string;
+  text: string;
 }
 interface Token {
   kind: "string" | "name" | "word" | "array" | "dict";
@@ -68,6 +85,9 @@ interface Run extends EditableRun {
   horizontalScale: number;
   rise: number;
   parts: Token[];
+  textMatrix?: Matrix;
+  lineMatrix?: Matrix;
+  ctm: Matrix;
 }
 const name = (value: string) => PDFName.of(value);
 const binary = (bytes: Uint8Array) =>
@@ -692,6 +712,9 @@ function findRuns(page: PDFPage, content: string[]): Run[] {
                 horizontalScale: state.horizontalScale,
                 rise: state.rise,
                 parts,
+                textMatrix: textMatrix ?? undefined,
+                lineMatrix: lineMatrix ?? undefined,
+                ctm: state.ctm,
               };
               run.geometry = runGeometry(run);
               runs.push(run);
@@ -720,26 +743,40 @@ export async function inspectEditableText(
   bytes: Uint8Array,
   pageIndex: number,
   replacements: TextReplacement[] = [],
+  copies: TextCopy[] = [],
 ): Promise<EditableRun[]> {
   const doc = await PDFDocument.load(bytes);
   const page = doc.getPage(pageIndex);
-  return inspectPageText(page, replacements);
+  return inspectPageText(page, replacements, copies);
 }
 export function inspectPageText(
   page: PDFPage,
   replacements: TextReplacement[] = [],
+  copies: TextCopy[] = [],
 ): EditableRun[] {
   const values = new Map(
     replacements.map((edit) => [edit.runId, edit.replacement]),
   );
-  return findRuns(page, streams(page)).map((run) => ({
-    id: run.id,
-    text: run.text,
-    font: run.font,
-    characters: run.characters,
-    fontSize: Math.abs(run.size),
-    geometry: runGeometry(run, values.get(run.id)),
-  }));
+  return findRuns(page, streams(page)).flatMap((run) => [
+    {
+      id: run.id,
+      text: run.text,
+      font: run.font,
+      characters: run.characters,
+      fontSize: Math.abs(run.size),
+      geometry: runGeometry(run, values.get(run.id)),
+    },
+    ...copies
+      .filter((copy) => copy.sourceRunId === run.id)
+      .map((copy) => ({
+        id: `copy:${copy.id}`,
+        text: copy.text,
+        font: run.font,
+        characters: run.characters,
+        fontSize: Math.abs(run.size),
+        geometry: runGeometry(run, values.get(`copy:${copy.id}`) ?? copy.text),
+      })),
+  ]);
 }
 
 /** Rewrite the original text operator, preserving its font, colour and matrix. */
@@ -747,7 +784,17 @@ export function replacePageText(
   page: PDFPage,
   replacements: TextReplacement[],
   offsets: TextOffset[] = [],
+  transforms: TextTransform[] = [],
+  copies: TextCopy[] = [],
 ) {
+  if (transforms.length || copies.length)
+    return replaceWithPlacements(
+      page,
+      replacements,
+      offsets,
+      transforms,
+      copies,
+    );
   if (!replacements.length && !offsets.length) return;
   const content = streams(page);
   const runs = findRuns(page, content);
@@ -834,6 +881,131 @@ export function replacePageText(
         content[edit.stream].slice(edit.end);
     });
   // New streams for this page only: a shared source stream must not affect copies.
+  page.node.set(
+    name("Contents"),
+    page.doc.context.obj(
+      content.map((value) =>
+        page.doc.context.register(page.doc.context.flateStream(toBytes(value))),
+      ),
+    ),
+  );
+}
+
+function replaceWithPlacements(
+  page: PDFPage,
+  replacements: TextReplacement[],
+  offsets: TextOffset[],
+  placements: TextTransform[],
+  copies: TextCopy[],
+) {
+  const content = streams(page),
+    runs = findRuns(page, content),
+    source = new Map(runs.map((run) => [run.id, run]));
+  const edits = new Map(replacements.map((e) => [e.runId, e])),
+    moves = new Map(offsets.map((e) => [e.runId, e])),
+    matrices = new Map(placements.map((e) => [e.runId, e]));
+  if (
+    edits.size !== replacements.length ||
+    moves.size !== offsets.length ||
+    matrices.size !== placements.length ||
+    new Set(copies.map((c) => c.id)).size !== copies.length
+  )
+    throw Error("Duplicate text operation.");
+  const aliases = new Map<string, { run: Run; text: string }>();
+  runs.forEach((run) => aliases.set(run.id, { run, text: run.text }));
+  for (const copy of copies) {
+    const run = source.get(copy.sourceRunId);
+    if (!run || run.text !== copy.sourceOriginal)
+      throw Error("The copied source text changed. Reopen this page.");
+    aliases.set(`copy:${copy.id}`, { run, text: copy.text });
+  }
+  const touched = new Set(copies.map((c) => c.sourceRunId));
+  for (const [id, operation] of [...edits, ...moves, ...matrices]) {
+    const entry = aliases.get(id);
+    if (!entry || entry.text !== operation.original)
+      throw Error(
+        "The original text changed. Reopen this page before editing.",
+      );
+    touched.add(entry.run.id);
+  }
+  const numeric = (n: number) => {
+    if (!Number.isFinite(n) || Math.abs(n) > 1e12)
+      throw Error("Text transformation is out of range.");
+    return String(Number(n.toFixed(10)));
+  };
+  const tm = (matrix: Matrix) => matrix.map(numeric).join(" ") + " Tm";
+  const changes = runs
+    .filter((run) => touched.has(run.id))
+    .map((run) => {
+      const show = (id: string, original: string) => {
+        const text = edits.get(id)?.replacement ?? original;
+        if (/[\r\n]/.test(text))
+          throw Error("Use a single line for this text run.");
+        const bytes = run.codec.encode(text),
+          hex = `<${bytes.map((b) => b.toString(16).padStart(2, "0")).join("")}>`;
+        const advance =
+          run.codec.advance(
+            bytes,
+            run.size,
+            run.characterSpacing,
+            run.wordSpacing,
+          ) - run.leading.reduce((sum, n) => sum + Number(n), 0);
+        const drawing =
+          text === run.text
+            ? content[run.stream].slice(run.start, run.end)
+            : `[${run.leading.join(" ")} ${hex} ${numeric(advance - run.advance)}] TJ`;
+        const offset = moves.get(id),
+          placement = matrices.get(id);
+        if (
+          !run.matrix ||
+          !run.textMatrix ||
+          !run.lineMatrix ||
+          !run.geometry
+        ) {
+          if (offset || placement || id.startsWith("copy:"))
+            throw Error("This text has an unsupported transformation.");
+          return drawing;
+        }
+        const matrix = placement?.matrix ?? identity();
+        if (matrix.length !== 6 || !matrix.every(Number.isFinite))
+          throw Error("Text transformation is invalid.");
+        inverse(matrix);
+        const effective = multiply(
+          [1, 0, 0, 1, offset?.dx ?? 0, offset?.dy ?? 0],
+          matrix,
+        );
+        return `${tm(multiply(inverse(run.ctm), multiply(effective, run.matrix)))}\n${drawing}`;
+      };
+      let value = show(run.id, run.text);
+      for (const copy of copies.filter((c) => c.sourceRunId === run.id))
+        value += "\n" + show(`copy:${copy.id}`, copy.text);
+      if (run.textMatrix && run.lineMatrix && run.geometry) {
+        const after = multiply(run.textMatrix, [
+          1,
+          0,
+          0,
+          1,
+          (run.advance * run.size * run.horizontalScale) / 1000,
+          0,
+        ]);
+        const cursor = inverseVector(run.lineMatrix, {
+          x: after[4] - run.lineMatrix[4],
+          y: after[5] - run.lineMatrix[5],
+        });
+        if (Math.abs(cursor.y) > 1e-5)
+          throw Error("Unable to preserve the surrounding text cursor.");
+        value += `\n${tm(run.lineMatrix)} 0 Tc [${numeric((-1000 * cursor.x) / (run.size * run.horizontalScale))}] TJ ${numeric(run.characterSpacing)} Tc`;
+      }
+      return { ...run, value };
+    });
+  changes
+    .sort((a, b) => b.start - a.start)
+    .forEach((edit) => {
+      content[edit.stream] =
+        content[edit.stream].slice(0, edit.start) +
+        edit.value +
+        content[edit.stream].slice(edit.end);
+    });
   page.node.set(
     name("Contents"),
     page.doc.context.obj(

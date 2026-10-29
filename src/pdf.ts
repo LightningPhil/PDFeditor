@@ -10,13 +10,32 @@ import type { Paragraph, TextFont } from "./typography";
 import { validateParagraph } from "./typography";
 import { replacePageText, inspectPageText } from "./text-edit";
 import { storePageTextGroups } from "./text-group-storage";
-import type { TextReplacement, TextOffset } from "./text-edit";
+import type {
+  TextReplacement,
+  TextOffset,
+  TextTransform,
+  TextCopy,
+} from "./text-edit";
 import type { TextGroup } from "./text-boxes";
 import { assertTextGroups } from "./text-boxes";
 
-export type Annotation = { id: string; color: string; x: number; y: number } & (
+export type Annotation = {
+  id: string;
+  color: string;
+  x: number;
+  y: number;
+  rotation?: number;
+  locked?: boolean;
+  role?: "page-number" | "header" | "footer";
+} & (
   | { kind: "text"; text: string; size: number; font?: TextFont }
-  | { kind: "rectangle"; width: number; height: number }
+  | {
+      kind: "rectangle";
+      width: number;
+      height: number;
+      fill?: string;
+      borderWidth?: number;
+    }
 );
 export interface Source {
   id: string;
@@ -33,6 +52,10 @@ export interface EditorPage {
   textGroups?: TextGroup[];
   rotation?: number;
   paragraphs?: Paragraph[];
+  textTransforms?: TextTransform[];
+  textCopies?: TextCopy[];
+  lockedRunIds?: string[];
+  crop?: { x: number; y: number; width: number; height: number };
 }
 
 /** Annotations render in a separate SVG layer; grouping never affects pixels. */
@@ -77,6 +100,22 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
     }
     const [page] = await output.copyPages(original, [item.index]);
     output.addPage(page);
+    page.node.delete(PDFName.of("PDFeditorLockedText"));
+    if (item.crop) {
+      const b = item.crop,
+        m = page.getMediaBox();
+      if (
+        ![b.x, b.y, b.width, b.height].every(Number.isFinite) ||
+        b.width <= 0 ||
+        b.height <= 0 ||
+        b.x < m.x - 1e-5 ||
+        b.y < m.y - 1e-5 ||
+        b.x + b.width > m.x + m.width + 1e-5 ||
+        b.y + b.height > m.y + m.height + 1e-5
+      )
+        throw Error("Crop must be a positive rectangle inside the media box.");
+      page.setCropBox(b.x, b.y, b.width, b.height);
+    }
     if (item.rotation) {
       if (!Number.isInteger(item.rotation / 90))
         throw new Error("Page rotation must be a multiple of 90 degrees.");
@@ -86,7 +125,14 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
         ),
       );
     }
-    const sourceRuns = item.textGroups?.length ? inspectPageText(page) : [];
+    const needsMapping = !!(
+      item.textGroups?.length ||
+      item.lockedRunIds?.length ||
+      item.annotations.some((a) => a.locked)
+    );
+    const sourceRuns = needsMapping
+      ? inspectPageText(page, [], item.textCopies)
+      : [];
     const validGroups = assertTextGroups(item.textGroups ?? [], [
       ...sourceRuns.map((run) => run.id),
       ...item.annotations
@@ -99,14 +145,20 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
         edit.replacement,
       ]),
     );
-    const expected = item.textGroups?.length
+    const expected = needsMapping
       ? sourceRuns.flatMap((run) => {
           const text = replacements.get(run.id) ?? run.text;
           return text.trim() ? [{ id: run.id, text, font: run.font }] : [];
         })
       : [];
     storePageTextGroups(page, []);
-    replacePageText(page, item.textReplacements ?? [], item.textOffsets ?? []);
+    replacePageText(
+      page,
+      item.textReplacements ?? [],
+      item.textOffsets ?? [],
+      item.textTransforms,
+      item.textCopies,
+    );
     for (const annotation of item.annotations) {
       const hex = annotation.color.replace("#", "");
       const color = rgb(
@@ -121,7 +173,7 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           annotationFont = await output.embedFont(fontName as StandardFonts);
           fonts.set(fontName, annotationFont);
         }
-        if (item.textGroups?.length && annotation.text.trim())
+        if (needsMapping && annotation.text.trim())
           expected.push({
             id: `added:${annotation.id}`,
             text: annotation.text,
@@ -140,6 +192,7 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           size: annotation.size,
           font: annotationFont,
           color,
+          rotate: degrees(annotation.rotation ?? 0),
         });
       } else
         page.drawRectangle({
@@ -148,10 +201,19 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           width: annotation.width,
           height: annotation.height,
           borderColor: color,
-          borderWidth: 2,
+          borderWidth: annotation.borderWidth ?? 2,
+          ...(annotation.fill
+            ? {
+                color: rgb(
+                  parseInt(annotation.fill.slice(1, 3), 16) / 255,
+                  parseInt(annotation.fill.slice(3, 5), 16) / 255,
+                  parseInt(annotation.fill.slice(5, 7), 16) / 255,
+                ),
+              }
+            : {}),
         });
     }
-    if (validGroups.length)
+    if (needsMapping)
       grouped.push({
         page,
         item: { ...item, textGroups: validGroups },
@@ -203,6 +265,20 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           }))
           .filter((group) => group.runIds.length),
       );
+      const locked = [
+        ...new Set([
+          ...(item.lockedRunIds ?? []),
+          ...item.annotations
+            .filter((a) => a.locked && a.kind === "text")
+            .map((a) => `added:${a.id}`),
+        ]),
+      ].flatMap((id) => (mapping.has(id) ? [mapping.get(id)!] : []));
+      if (locked.length)
+        page.node.set(
+          PDFName.of("PDFeditorLockedText"),
+          PDFHexString.fromText(JSON.stringify(locked)),
+        );
+      else page.node.delete(PDFName.of("PDFeditorLockedText"));
     }
   }
   return output.save();

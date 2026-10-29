@@ -45,6 +45,7 @@ export function SearchPanel({
           source.bytes,
           page.index,
           page.textReplacements,
+          page.textCopies,
         );
         next.set(page.id, runs);
         {
@@ -53,7 +54,10 @@ export function SearchPanel({
             const modified =
               page.annotations.length ||
               page.textReplacements?.length ||
-              page.textOffsets?.length;
+              page.textOffsets?.length ||
+              page.textCopies?.length ||
+              page.textTransforms?.length ||
+              page.crop;
             const document = modified
               ? await (task = getDocument({
                   data: await exportPagePreview(source, page, true),

@@ -65,6 +65,11 @@ export function documentChanges(
         ? `${page.textReplacements.length} text edits`
         : "",
       page.textOffsets?.length ? `${page.textOffsets.length} moved pieces` : "",
+      page.textTransforms?.length
+        ? `${page.textTransforms.length} transformed pieces`
+        : "",
+      page.textCopies?.length ? `${page.textCopies.length} text copies` : "",
+      page.crop ? "page cropped" : "",
       page.annotations.length ? `${page.annotations.length} additions` : "",
       JSON.stringify(page.textGroups ?? []) !==
       JSON.stringify(baseline[originalIndex]?.textGroups ?? [])

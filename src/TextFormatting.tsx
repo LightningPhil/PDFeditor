@@ -8,6 +8,7 @@ import type { Paragraph } from "./typography";
 import { bounds } from "./geometry";
 import { alignText } from "./text-alignment";
 import type { Alignment } from "./text-alignment";
+import { useStyleLibrary } from "./style-library";
 export function TextFormatting({
   page,
   runs,
@@ -38,6 +39,9 @@ export function TextFormatting({
   });
   const [error, setError] = useState("");
   const [preview, setPreview] = useState("");
+  const library = useStyleLibrary();
+  const [styleName, setStyleName] = useState("My style"),
+    [styleId, setStyleId] = useState("");
   const selection = boxes.filter((b) => selected.includes(b.id));
   const area = selection.length
     ? bounds(selection.flatMap((b) => b.points))
@@ -181,6 +185,70 @@ export function TextFormatting({
                 ))}
               </select>
             </label>
+            <details className="style-library">
+              <summary>Saved text styles</summary>
+              <label>
+                Style
+                <select
+                  aria-label="Saved text style"
+                  value={styleId}
+                  onChange={(e) => {
+                    setStyleId(e.target.value);
+                    const style =
+                      e.target.value === "last"
+                        ? library.last
+                        : library.styles.find((s) => s.id === e.target.value);
+                    if (
+                      style &&
+                      "name" in style &&
+                      typeof style.name === "string"
+                    )
+                      setStyleName(style.name);
+                    if (style)
+                      update({
+                        font: style.font,
+                        size: style.size,
+                        color: style.color,
+                        lineHeight: style.lineHeight,
+                      });
+                  }}
+                >
+                  <option value="">Current settings</option>
+                  <option value="last">Last used style</option>
+                  {library.styles.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Style name
+                <input
+                  aria-label="Text style name"
+                  value={styleName}
+                  onChange={(e) => setStyleName(e.target.value)}
+                />
+              </label>
+              <button
+                onClick={() =>
+                  perform(() => library.save(styleName, paragraph))
+                }
+              >
+                Save text style
+              </button>
+              <button
+                disabled={!library.styles.some((s) => s.id === styleId)}
+                onClick={() =>
+                  perform(() => {
+                    library.remove(styleId);
+                    setStyleId("");
+                  })
+                }
+              >
+                Delete text style
+              </button>
+            </details>
             <div className="form-grid">
               <label>
                 Size
@@ -272,6 +340,11 @@ export function TextFormatting({
                     () => crypto.randomUUID(),
                   );
                   onChange(next, next.paragraphs?.at(-1)?.groupId);
+                  try {
+                    library.setLast(paragraph);
+                  } catch {
+                    /* Document edits remain available if preferences cannot be saved. */
+                  }
                 })
               }
             >

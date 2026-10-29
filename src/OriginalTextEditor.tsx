@@ -125,7 +125,9 @@ export function OriginalTextEditor({
   }
   const selectedIds = new Set(selected);
   const selection = boxes.filter((box) => selectedIds.has(box.id));
-  const canMove = selection.length > 0 && selection.every((box) => box.movable);
+  const canMove =
+    selection.length > 0 &&
+    selection.every((box) => box.movable && !box.locked);
   return (
     <aside className="inspector text-editor" aria-busy={busy || loading}>
       <div className="panel-title">
@@ -259,6 +261,7 @@ export function OriginalTextEditor({
                     aria-label={`Text box ${index + 1}${box.joined ? ` part ${part + 1}` : ""}`}
                     value={drafts[run.id] ?? current(run.id, run.text)}
                     maxLength={1000}
+                    disabled={box.locked}
                     onChange={(event) =>
                       setDrafts((previous) => ({
                         ...previous,
@@ -274,7 +277,7 @@ export function OriginalTextEditor({
                   Text can be edited here; its position cannot yet be moved.
                 </small>
               )}
-              <button disabled={!dirty}>Apply change</button>
+              <button disabled={!dirty || box.locked}>Apply change</button>
             </form>
           );
         })}

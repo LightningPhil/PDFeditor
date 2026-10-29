@@ -3,6 +3,7 @@ import type { EditableRun, TextOffset } from "./text-edit";
 import type { Point } from "./geometry";
 import { Encodings, Font, FontNames } from "@pdf-lib/standard-fonts";
 import { textWidth } from "./typography";
+import { transform, identity } from "./geometry";
 
 export interface TextGroup {
   id: string;
@@ -14,6 +15,7 @@ export interface TextBox {
   points: Point[];
   joined: boolean;
   movable: boolean;
+  locked: boolean;
   text: string;
   pieces: { runId: string; quad: Point[]; baseline: Point }[];
 }
@@ -27,7 +29,8 @@ export function isGroupId(id: unknown): id is string {
     !!id.trim() &&
     id.length <= 512 &&
     !/^\d+:\d+$/.test(id) &&
-    !id.startsWith("added:")
+    !id.startsWith("added:") &&
+    !id.startsWith("copy:")
   );
 }
 export function hasTextGeometry(run: EditableRun): boolean {
@@ -110,6 +113,13 @@ export function getAllTextRuns(
               1000
           );
         }, 0);
+    const angle = ((annotation.rotation ?? 0) * Math.PI) / 180,
+      c = Math.cos(angle),
+      s = Math.sin(angle);
+    const rotate = (p: Point) => ({
+      x: annotation.x + c * (p.x - annotation.x) - s * (p.y - annotation.y),
+      y: annotation.y + s * (p.x - annotation.x) + c * (p.y - annotation.y),
+    });
     return [
       {
         id: `added:${annotation.id}`,
@@ -130,7 +140,7 @@ export function getAllTextRuns(
               y: annotation.y + annotation.size * 0.8,
             },
             { x: annotation.x, y: annotation.y + annotation.size * 0.8 },
-          ],
+          ].map(rotate),
         },
       },
     ];
@@ -148,6 +158,13 @@ export function getTextBoxes(page: EditorPage, runs: EditableRun[]): TextBox[] {
   const replacements = new Map(
     (page.textReplacements ?? []).map((edit) => [edit.runId, edit.replacement]),
   );
+  const matrices = new Map(
+    (page.textTransforms ?? []).map((t) => [t.runId, t.matrix]),
+  );
+  const locked = new Set(page.lockedRunIds ?? []);
+  page.annotations
+    .filter((a) => a.locked)
+    .forEach((a) => locked.add(`added:${a.id}`));
   const makeBox = (id: string, members: EditableRun[], joined = false) => {
     const pieces = members.flatMap((run) => {
       if (!hasTextGeometry(run)) return [];
@@ -155,7 +172,10 @@ export function getTextBoxes(page: EditorPage, runs: EditableRun[]): TextBox[] {
         dx = offset?.dx ?? 0,
         dy = offset?.dy ?? 0;
       if (![dx, dy].every(Number.isFinite)) return [];
-      const shift = (point: Point) => ({ x: point.x + dx, y: point.y + dy });
+      const shift = (point: Point) => {
+        const p = transform(matrices.get(run.id) ?? identity(), point);
+        return { x: p.x + dx, y: p.y + dy };
+      };
       return [
         {
           runId: run.id,
@@ -169,6 +189,7 @@ export function getTextBoxes(page: EditorPage, runs: EditableRun[]): TextBox[] {
       joined,
       runs: members,
       movable: pieces.length === members.length,
+      locked: members.some((run) => locked.has(run.id)),
       text: members.map((run) => replacements.get(run.id) ?? run.text).join(""),
       pieces,
       points: pieces.flatMap((piece) => piece.quad),
@@ -219,6 +240,8 @@ export function joinTextBoxes(
     throw new Error(
       "All selected text must have a supported position before joining.",
     );
+  if (boxes.some((box) => box.locked))
+    throw Error("Unlock the selected text before joining it.");
   const members = new Set(
     boxes.flatMap((box) => box.runs.map((run) => run.id)),
   );
@@ -248,6 +271,13 @@ export function ungroupTextBoxes(
   page: EditorPage,
   selected: string[],
 ): EditorPage {
+  const groups = (page.textGroups ?? []).filter((g) => selected.includes(g.id));
+  const locked = new Set([
+    ...(page.lockedRunIds ?? []),
+    ...page.annotations.filter((a) => a.locked).map((a) => `added:${a.id}`),
+  ]);
+  if (groups.some((g) => g.runIds.some((id) => locked.has(id))))
+    throw Error("Unlock the selected text before ungrouping it.");
   return {
     ...page,
     textGroups: (page.textGroups ?? []).filter(
@@ -266,6 +296,8 @@ export function moveTextBoxes(
 ): EditorPage {
   if (![dx, dy].every(Number.isFinite))
     throw new Error("Text position must be finite.");
+  if (selectedBoxes(page, runs, selected).some((box) => box.locked))
+    throw Error("Unlock the selected text before moving it.");
   const members = [
     ...new Map(
       selectedBoxes(page, runs, selected)

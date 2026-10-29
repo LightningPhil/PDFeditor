@@ -20,7 +20,7 @@ creates the production bundle. `npm test` runs the PDF export regression tests.
 - Open or drop one or more PDFs. Subsequent imports insert after the selected page.
 - Organise real page thumbnails: select several, drag with their grips, rotate,
   duplicate, extract, remove, or merge PDFs, with undo and redo.
-- Preview pages and add text or outline rectangles in a chosen colour.
+- Preview pages and add text or rectangles with fill and border controls.
 - Inspect extracted page text in a read-only panel.
 - Edit supported original text runs using the original font, colour and position.
 - Export a new PDF with original page content and new annotations.
@@ -34,6 +34,53 @@ creates the production bundle. `npm test` runs the PDF export regression tests.
   whole-word options, navigation and a replacement preview.
 - Toggle Original/Edited, highlight additions/edits/deletions, and review changes
   to page order, rotation, text, grouping and annotations before export.
+
+## Everyday editing tools
+
+Select text or click a rectangle border in **Select** or **Edit text**. Shift-click
+extends the selection. **Selection tools** provides rotation, duplication, locking
+and layer controls. Original text and its copies keep the original font and
+colour; rotation changes their native drawing matrices. Copies start 12 PDF points
+right and down and can be edited independently. Joined copies retain their groups
+and paragraph settings. Positive text rotation is counter-clockwise.
+
+Locked items stay selectable so they can be unlocked, but cannot be moved, edited,
+reflowed or joined. Text locks survive export/reopening in PDFeditor. Locks prevent
+accidental edits; they are not PDF access permissions.
+
+Drag rectangle borders to move them and corner handles to resize them. The
+**Rectangle appearance & size** panel also sets exact position, dimensions, fill,
+border colour and thickness. Bring forward/backward moves added items one layer;
+bring to front/send to back moves them across all added items. Source PDF text and
+source-font copies retain their source drawing order. Rectangle editing settings
+and locks are retained in local workspace recovery; exported rectangles become
+ordinary static PDF graphics.
+
+**Fit page**, **Fit width** and **Zoom to selection** adjust the view. The page
+number field jumps directly to a page; Page Up/Page Down and Ctrl/Cmd+Home/End work
+outside text inputs and dialogs.
+
+**Page tools** adds page numbers or headers/footers to a chosen range. Tokens
+include `{n}` (sequence), `{page}` (page position), `{pages}` (document total),
+`{filename}` and `{date}`. Numbering and footer/header stamps use separate lanes
+when they overlap. Reapplying replaces workspace stamps of the same kind on the
+chosen pages. Reapply after reordering pages. Exported stamps are ordinary native
+text; reopening an export does not retain their automatic stamp recipes.
+
+**Crop pages** removes margins from the displayed view, including rotated pages.
+It defaults to the current page and accepts ranges. Restore original crop reverses
+the crop. Cropping hides content outside the crop box; it does not delete or redact
+that content.
+
+**Export PDF** accepts ranges such as `1-3, 7, 10-12`, preserves the entered order,
+includes each page once, and lets you choose the output filename. Empty ranges mean
+all pages.
+
+**Paragraph & font formatting → Saved text styles** saves named favourites and
+recalls the last-used font, size, colour and line spacing. New text uses the last
+font, size and colour. These preferences stay in this browser and are shared
+between workspace tabs. Selecting a paragraph style changes the draft settings;
+**Apply paragraph reflow** applies them to the document.
 
 The save indicator confirms when local recovery has completed. Export creates
 a shareable PDF and does not change source files. Clearing browser site data
@@ -229,8 +276,8 @@ mixed fonts, colours, opacity, skew and pre-existing edits across repeated expor
 
 Replacement fonts support WinAnsi Latin characters; custom font-file embedding
 and broader Unicode shaping are not implemented. Original-font edits use the
-glyphs available in the PDF. Shapes are rectangles only; rectangle selection and
-resizing, password entry and interactive OCR remain future work.
+glyphs available in the PDF. Shapes are rectangles only; password entry and
+interactive OCR are not implemented.
 Password-protected PDFs may fail to open. Page export is intended for ordinary
 static PDFs: document-level features
 such as bookmarks, signatures, forms, and tagged structure are not guaranteed

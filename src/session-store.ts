@@ -16,6 +16,8 @@ export interface SessionSnapshot {
   formatDrafts?: Record<string, Paragraph>;
   tool?: string;
   alignmentReferences?: Record<string, AlignmentReferences>;
+  shapeSelection?: { pageId: string; ids: string[] };
+  zoomMode?: "manual" | "fit-page" | "fit-width";
 }
 const database = "PDFeditor-local-work";
 function open(): Promise<IDBDatabase> {

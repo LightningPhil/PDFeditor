@@ -10,6 +10,12 @@ export function applyTextEdits(
   page: EditorPage,
   edits: TextReplacement[],
 ): EditorPage {
+  const locked = new Set([
+    ...(page.lockedRunIds ?? []),
+    ...page.annotations.filter((a) => a.locked).map((a) => `added:${a.id}`),
+  ]);
+  if (edits.some((edit) => locked.has(edit.runId)))
+    throw Error("Unlock the selected text before editing it.");
   const map = new Map(edits.map((edit) => [edit.runId, edit]));
   const affected = new Set(
     (page.textGroups ?? [])
@@ -107,7 +113,9 @@ export function paragraphFromSelection(
         : /italic|oblique/i.test(first.run.font)
           ? "Helvetica-Oblique"
           : "Helvetica"),
-    color: "#202a25",
+    color:
+      page.annotations.find((a) => `added:${a.id}` === first.run.id)?.color ??
+      "#202a25",
     lineHeight: 1.3,
     align: "left",
   };
@@ -125,7 +133,7 @@ export function reflowSelection(
   if (
     !selected.length ||
     selected.length !== new Set(ids).size ||
-    selected.some((box) => !box.movable)
+    selected.some((box) => !box.movable || box.locked)
   )
     throw new Error("Select movable text to format.");
   const lines = layoutParagraph(paragraph).filter((line) => line.text.trim());

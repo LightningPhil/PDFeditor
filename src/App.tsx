@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { PointerEvent } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
@@ -61,9 +68,16 @@ import { renderPageFrame } from "./page-frame";
 import { ReferenceAlignment } from "./ReferenceAlignment";
 import { emptyReferences } from "./reference-alignment";
 import type { AlignmentReferences } from "./reference-alignment";
+import { ItemTools } from "./ItemTools";
+import { ShapeOverlay } from "./ShapeOverlay";
+import { PageUtilities } from "./PageUtilities";
+import { readDocumentLocks } from "./item-operations";
+import { readStyleLibrary, useStyleLibrary } from "./style-library";
+import type { TextStyle } from "./style-library";
+import { bounds, transform } from "./geometry";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
-type Tool = "select" | "text" | "rectangle" | "inspect" | "edit";
+type Tool = "select" | "text" | "rectangle" | "inspect" | "edit" | "view";
 type LoadedSource = Source & {
   document: PDFDocumentProxy;
   task: PDFDocumentLoadingTask;
@@ -115,6 +129,11 @@ function PageView({
   highlight,
   deletedQuads,
   references,
+  shapeSelected,
+  onShapeSelect,
+  onPageChange,
+  addStyle,
+  zoom,
 }: {
   source: LoadedSource;
   page: EditorPage;
@@ -129,11 +148,22 @@ function PageView({
   onSelect: (id: string | null, extend?: boolean) => void;
   onSelection: (ids: string[]) => void;
   onMoveText: (ids: string[], dx: number, dy: number) => void;
-  onViewport: (matrix: Matrix, pageId: string, rotation: number) => void;
+  onViewport: (
+    matrix: Matrix,
+    pageId: string,
+    rotation: number,
+    width: number,
+    height: number,
+  ) => void;
   snapEnabled: boolean;
   highlight: boolean;
   deletedQuads: Point[][];
   references: AlignmentReferences;
+  shapeSelected: string[];
+  onShapeSelect: (id: string, extend: boolean) => void;
+  onPageChange: (page: EditorPage) => void;
+  addStyle: TextStyle;
+  zoom: number;
 }) {
   const canvas = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
@@ -159,7 +189,10 @@ function PageView({
         !page.textReplacements?.length &&
         !page.textOffsets?.length &&
         !page.annotations.length &&
-        !page.rotation
+        !page.rotation &&
+        !page.crop &&
+        !page.textCopies?.length &&
+        !page.textTransforms?.length
       )
         return source.document.getPage(page.index + 1);
       const data = await exportPagePreview(source, page, true);
@@ -176,7 +209,11 @@ function PageView({
     })()
       .then(async (pdfPage) => {
         if (cancelled || !canvas.current || !pdfPage) return;
-        const scale = Math.min(window.devicePixelRatio || 1, 2) * 1.4;
+        const base = pdfPage.getViewport({ scale: 1 });
+        const scale = Math.min(
+          Math.min(window.devicePixelRatio || 1, 2) * Math.max(1.4, zoom / 100),
+          Math.sqrt(20000000 / (base.width * base.height)),
+        );
         await renderPageFrame(pdfPage, scale, {
           createCanvas: () => document.createElement("canvas"),
           current: () => !cancelled && !!canvas.current,
@@ -186,7 +223,13 @@ function PageView({
           present: (frame, view) => {
             canvas.current!.replaceChildren(frame);
             setViewport(view.transform as Matrix);
-            onViewport(view.transform as Matrix, page.id, page.rotation ?? 0);
+            onViewport(
+              view.transform as Matrix,
+              page.id,
+              page.rotation ?? 0,
+              view.width,
+              view.height,
+            );
             setPositionRotation(page.rotation ?? 0);
             setPositionReady(true);
             setSize({ width: view.width, height: view.height });
@@ -211,8 +254,12 @@ function PageView({
     page.textOffsets,
     page.annotations,
     page.rotation,
+    page.crop,
+    page.textCopies,
+    page.textTransforms,
     onError,
     onViewport,
+    zoom,
   ]);
 
   function point(event: PointerEvent<SVGSVGElement>) {
@@ -258,7 +305,7 @@ function PageView({
             return;
           }
           if (tool === "edit") onSelect(null);
-          if (tool === "select" || tool === "edit") return;
+          if (tool === "select" || tool === "edit" || tool === "view") return;
           const p = point(event);
           if (tool === "text" && text.trim())
             onAdd({
@@ -268,7 +315,8 @@ function PageView({
               y: p.y,
               text,
               color,
-              size: 16,
+              size: addStyle.size,
+              font: addStyle.font,
             });
           if (tool === "rectangle") {
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -325,6 +373,7 @@ function PageView({
                 .filter(
                   (piece) =>
                     piece.runId.startsWith("added:") ||
+                    piece.runId.startsWith("copy:") ||
                     page.textReplacements?.some(
                       (e) => e.runId === piece.runId,
                     ) ||
@@ -340,7 +389,7 @@ function PageView({
           </g>
         </svg>
       )}
-      {tool === "edit" && (
+      {(tool === "edit" || tool === "select") && (
         <svg
           className="reference-layer"
           viewBox={`0 0 ${size.width} ${size.height}`}
@@ -376,7 +425,7 @@ function PageView({
           </g>
         </svg>
       )}
-      {tool === "edit" && (
+      {(tool === "edit" || tool === "select") && (
         <TextBoxOverlay
           disabled={!ready}
           positionReady={
@@ -393,6 +442,18 @@ function PageView({
           onMove={onMoveText}
         />
       )}
+      {(tool === "edit" || tool === "select") && (
+        <ShapeOverlay
+          page={page}
+          viewport={viewport}
+          width={size.width}
+          height={size.height}
+          selected={shapeSelected}
+          disabled={!ready}
+          onSelect={onShapeSelect}
+          onChange={onPageChange}
+        />
+      )}
     </div>
   );
 }
@@ -403,12 +464,24 @@ export default function App() {
   const [cursor, setCursor] = useState(0);
   const [activeId, setActiveId] = useState("");
   const [tool, setTool] = useState<Tool>("select");
-  const [color, setColor] = useState("#297768");
+  const [color, setColor] = useState(() => readStyleLibrary().last.color);
+  const styles = useStyleLibrary();
+  useEffect(() => setColor(styles.last.color), [styles.last.color]);
+  const [shapeSelection, setShapeSelection] = useState<{
+    pageId: string;
+    ids: string[];
+  }>({ pageId: "", ids: [] });
   const [text, setText] = useState("Your text");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [inspection, setInspection] = useState<string | null>(null);
   const [zoom, setZoom] = useState(85);
+  const [zoomMode, setZoomMode] = useState<"manual" | "fit-page" | "fit-width">(
+    "manual",
+  );
+  const canvasArea = useRef<HTMLDivElement>(null);
+  const [zoomTarget, setZoomTarget] = useState<Point | null>(null);
+  const [pageJump, setPageJump] = useState("1");
   const [selection, setSelection] = useState<{
     pageId: string;
     runIds: string[];
@@ -423,9 +496,9 @@ export default function App() {
   const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>(
     {},
   );
-  const [dialog, setDialog] = useState<"search" | "pages" | "review" | null>(
-    null,
-  );
+  const [dialog, setDialog] = useState<
+    "search" | "pages" | "review" | "export" | "utilities" | null
+  >(null);
   const [showOriginal, setShowOriginal] = useState(false),
     [highlight, setHighlight] = useState(false),
     [snapEnabled, setSnapEnabled] = useState(true);
@@ -465,6 +538,8 @@ export default function App() {
     setSelection(snapshot.selection ?? { pageId: "", runIds: [] });
     setFormatDrafts(snapshot.formatDrafts ?? {});
     setAlignmentReferences(snapshot.alignmentReferences ?? {});
+    setShapeSelection(snapshot.shapeSelection ?? { pageId: "", ids: [] });
+    setZoomMode(snapshot.zoomMode ?? "manual");
     if (
       ["select", "edit", "text", "rectangle", "inspect"].includes(
         snapshot.tool ?? "",
@@ -532,6 +607,8 @@ export default function App() {
         selection,
         formatDrafts,
         alignmentReferences,
+        shapeSelection,
+        zoomMode,
         tool,
       };
       void saveSession(snapshot)
@@ -563,6 +640,8 @@ export default function App() {
     selection,
     formatDrafts,
     alignmentReferences,
+    shapeSelection,
+    zoomMode,
     tool,
   ]);
   useEffect(
@@ -586,12 +665,43 @@ export default function App() {
             textGroups: [],
             paragraphs: [],
             rotation: 0,
+            crop: undefined,
+            textTransforms: [],
+            textCopies: [],
+            lockedRunIds: [],
           }
         : active,
     [active, showOriginal],
   );
   const source = sources.find((item) => item.id === active?.sourceId);
   const activeIndex = pages.findIndex((page) => page.id === active?.id);
+  useEffect(() => setPageJump(String(activeIndex + 1)), [activeIndex]);
+  function jumpPage() {
+    const number = Number(pageJump);
+    if (!Number.isInteger(number) || number < 1 || number > pages.length) {
+      setError(`Enter a page number from 1 to ${pages.length}.`);
+      return;
+    }
+    setActiveId(pages[number - 1].id);
+  }
+  const selectedShapes =
+    shapeSelection.pageId === active?.id
+      ? shapeSelection.ids.filter((id) =>
+          active?.annotations.some((a) => a.id === id),
+        )
+      : [];
+  function selectShape(id: string, extend: boolean) {
+    if (!active) return;
+    if (!extend) setSelection({ pageId: active.id, runIds: [] });
+    setShapeSelection({
+      pageId: active.id,
+      ids: extend
+        ? selectedShapes.includes(id)
+          ? selectedShapes.filter((value) => value !== id)
+          : [...selectedShapes, id]
+        : [id],
+    });
+  }
   useEffect(() => {
     if (!dialog) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -656,18 +766,40 @@ export default function App() {
           ),
         );
       }
+      if (!input && !dialog && !busy && pages.length) {
+        let destination: number | undefined;
+        if (event.key === "PageDown") destination = activeIndex + 1;
+        if (event.key === "PageUp") destination = activeIndex - 1;
+        if ((event.ctrlKey || event.metaKey) && event.key === "Home")
+          destination = 0;
+        if ((event.ctrlKey || event.metaKey) && event.key === "End")
+          destination = pages.length - 1;
+        if (destination !== undefined) {
+          event.preventDefault();
+          setActiveId(
+            pages[Math.max(0, Math.min(pages.length - 1, destination))].id,
+          );
+        }
+      }
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [pages.length, dialog, busy, history.length]);
+  }, [pages, activeIndex, dialog, busy, history.length]);
   const [pageViewport, setPageViewport] = useState<{
     pageId: string;
     matrix: Matrix;
     rotation: number;
-  }>({ pageId: "", matrix: identity(), rotation: 0 });
+    width: number;
+    height: number;
+  }>({ pageId: "", matrix: identity(), rotation: 0, width: 595, height: 842 });
   const publishViewport = useCallback(
-    (matrix: Matrix, pageId: string, rotation: number) =>
-      setPageViewport({ matrix, pageId, rotation }),
+    (
+      matrix: Matrix,
+      pageId: string,
+      rotation: number,
+      width: number,
+      height: number,
+    ) => setPageViewport({ matrix, pageId, rotation, width, height }),
     [],
   );
   const [runState, setRunState] = useState<{
@@ -694,7 +826,12 @@ export default function App() {
     let cancelled = false;
     setReadingText(true);
     void Promise.all([
-      inspectEditableText(source.bytes, active.index, active.textReplacements),
+      inspectEditableText(
+        source.bytes,
+        active.index,
+        active.textReplacements,
+        active.textCopies,
+      ),
       inspectEditableText(source.bytes, active.index),
     ])
       .then(([runs, original]) => {
@@ -709,9 +846,16 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [active?.id, active?.index, active?.textReplacements, source]);
+  }, [
+    active?.id,
+    active?.index,
+    active?.textReplacements,
+    active?.textCopies,
+    source,
+  ]);
   function selectText(id: string | null, extend = false) {
     if (!active) return;
+    if (!extend) setShapeSelection({ pageId: active.id, ids: [] });
     setSelection({
       pageId: active.id,
       runIds: textMembersForBoxes(
@@ -727,6 +871,7 @@ export default function App() {
     });
   }
   function selectTextIds(ids: string[]) {
+    if (active) setShapeSelection({ pageId: active.id, ids: [] });
     if (active)
       setSelection({
         pageId: active.id,
@@ -737,6 +882,90 @@ export default function App() {
     () => (selected.length === 1 ? neighbouringLine(boxes, selected[0]) : []),
     [boxes, selected],
   );
+  const viewWidth =
+      pageViewport.pageId === active?.id ? pageViewport.width : 595,
+    viewHeight = pageViewport.pageId === active?.id ? pageViewport.height : 842;
+  useEffect(() => {
+    const area = canvasArea.current;
+    if (!area || zoomMode === "manual") return;
+    const fit = () => {
+      const padding = getComputedStyle(area);
+      const width = Math.max(
+          60,
+          area.clientWidth -
+            parseFloat(padding.paddingLeft) -
+            parseFloat(padding.paddingRight) -
+            2,
+        ),
+        height = Math.max(
+          60,
+          area.clientHeight -
+            parseFloat(padding.paddingTop) -
+            parseFloat(padding.paddingBottom) -
+            40,
+        );
+      setZoom(
+        Math.max(
+          0.1,
+          Math.min(
+            800,
+            100 *
+              (zoomMode === "fit-width"
+                ? width / viewWidth
+                : Math.min(width / viewWidth, height / viewHeight)),
+          ),
+        ),
+      );
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(area);
+    fit();
+    return () => observer.disconnect();
+  }, [zoomMode, viewWidth, viewHeight]);
+  useLayoutEffect(() => {
+    if (!zoomTarget || !canvasArea.current) return;
+    const area = canvasArea.current,
+      paper = area.querySelector<HTMLElement>(".paper");
+    if (!paper) return;
+    const r = paper.getBoundingClientRect(),
+      a = area.getBoundingClientRect();
+    area.scrollLeft +=
+      r.left - a.left + (zoomTarget.x * zoom) / 100 - a.width / 2;
+    area.scrollTop +=
+      r.top - a.top + (zoomTarget.y * zoom) / 100 - a.height / 2;
+    setZoomTarget(null);
+  }, [zoom, zoomTarget]);
+  function fitSelection() {
+    const points = boxes
+      .filter((b) => selected.includes(b.id))
+      .flatMap((b) => b.points);
+    for (const a of active?.annotations ?? [])
+      if (selectedShapes.includes(a.id) && a.kind === "rectangle")
+        points.push(
+          { x: a.x, y: a.y },
+          { x: a.x + a.width, y: a.y },
+          { x: a.x + a.width, y: a.y + a.height },
+          { x: a.x, y: a.y + a.height },
+        );
+    if (!points.length || !canvasArea.current) return;
+    const area = bounds(points.map((p) => transform(pageViewport.matrix, p))),
+      container = canvasArea.current;
+    setZoomMode("manual");
+    setZoom(
+      Math.max(
+        0.1,
+        Math.min(
+          800,
+          100 *
+            Math.min(
+              (container.clientWidth - 80) / Math.max(20, area.width),
+              (container.clientHeight - 100) / Math.max(20, area.height),
+            ),
+        ),
+      ),
+    );
+    setZoomTarget({ x: area.x + area.width / 2, y: area.y + area.height / 2 });
+  }
   function moveText(ids: string[], dx: number, dy: number) {
     if (!active || busyRef.current) return;
     try {
@@ -800,6 +1029,8 @@ export default function App() {
         selection,
         formatDrafts,
         alignmentReferences,
+        shapeSelection,
+        zoomMode,
         tool,
       });
       const id = uid();
@@ -814,6 +1045,7 @@ export default function App() {
       setDrafts({});
       setFormatDrafts({});
       setAlignmentReferences({});
+      setShapeSelection({ pageId: "", ids: [] });
       setSelection({ pageId: "", runIds: [] });
       setTool("select");
       setShowOriginal(false);
@@ -849,6 +1081,7 @@ export default function App() {
         const document = await task.promise;
         const groups = await readDocumentTextGroups(bytes);
         const paragraphs = await readDocumentParagraphs(bytes, groups);
+        const locks = await readDocumentLocks(bytes);
         const item = { id: uid(), name: file.name, bytes, document, task };
         loaded.push(item);
         for (let index = 0; index < document.numPages; index++)
@@ -859,6 +1092,7 @@ export default function App() {
             annotations: [],
             textGroups: groups[index] ?? [],
             paragraphs: paragraphs[index] ?? [],
+            lockedRunIds: locks[index] ?? [],
           });
       }
       if (!added.length) throw new Error("This PDF has no pages.");
@@ -897,7 +1131,7 @@ export default function App() {
     commit(next);
   }
   async function download(chosen: EditorPage[] = pages, filename?: string) {
-    if (busyRef.current) return;
+    if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
     setError("");
@@ -915,22 +1149,46 @@ export default function App() {
         `${sources[0]?.name.replace(/\.pdf$/i, "") || "document"}-edited.pdf`;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
+      return true;
     } catch (cause) {
       setError(
         `Could not export: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
+      return false;
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   }
   const tools = [
+    // Source text remains native when duplicating or transforming it.
     { id: "edit", label: "Edit text", icon: ScanText },
     { id: "select", label: "Select", icon: MousePointer2 },
     { id: "text", label: "Add text", icon: Type },
     { id: "rectangle", label: "Rectangle", icon: Square },
     { id: "inspect", label: "Inspect text", icon: ScanText },
   ] as const;
+  function itemControls() {
+    return active ? (
+      <ItemTools
+        page={active}
+        runs={runs}
+        boxes={boxes}
+        selected={selected}
+        shapes={selectedShapes}
+        onSelectShape={selectShape}
+        disabled={busy || readingText}
+        onChange={(next) =>
+          commit(pages.map((p) => (p.id === active.id ? next : p)))
+        }
+        onDuplicate={(result) => {
+          commit(pages.map((p) => (p.id === active.id ? result.page : p)));
+          setSelection({ pageId: active.id, runIds: result.runIds });
+          setShapeSelection({ pageId: active.id, ids: result.shapeIds });
+        }}
+      />
+    ) : null;
+  }
   return (
     <div
       className="app"
@@ -964,7 +1222,7 @@ export default function App() {
         <button
           className="primary"
           disabled={!pages.length || busy}
-          onClick={() => void download()}
+          onClick={() => setDialog("export")}
         >
           <Download size={16} /> Export PDF
         </button>
@@ -1127,9 +1385,14 @@ export default function App() {
             </span>
           </div>
         </aside>
-        <section className="editor">
+        <section
+          className={`editor ${zoomMode === "fit-page" ? "is-fit-page" : ""}`}
+        >
           {!!pages.length && (
             <nav className="document-tools" aria-label="Document tools">
+              <button disabled={busy} onClick={() => setDialog("utilities")}>
+                Page tools
+              </button>
               <button disabled={busy} onClick={() => setDialog("search")}>
                 Find & replace
               </button>
@@ -1186,6 +1449,26 @@ export default function App() {
               </button>
             ))}
             <div className="toolbar-divider" />
+            <button
+              disabled={!active}
+              aria-pressed={zoomMode === "fit-page"}
+              onClick={() => setZoomMode("fit-page")}
+            >
+              Fit page
+            </button>
+            <button
+              disabled={!active}
+              aria-pressed={zoomMode === "fit-width"}
+              onClick={() => setZoomMode("fit-width")}
+            >
+              Fit width
+            </button>
+            <button
+              disabled={!selected.length && !selectedShapes.length}
+              onClick={fitSelection}
+            >
+              Zoom to selection
+            </button>
             {tool === "edit" && (
               <label className="snap-toggle">
                 <input
@@ -1199,15 +1482,74 @@ export default function App() {
             <select
               aria-label="Page zoom"
               value={zoom}
-              onChange={(event) => setZoom(Number(event.target.value))}
+              onChange={(event) => {
+                setZoomMode("manual");
+                setZoom(Number(event.target.value));
+              }}
             >
-              {[60, 85, 100, 125].map((value) => (
-                <option key={value} value={value}>
-                  {value}%
-                </option>
-              ))}
+              {![25, 50, 60, 75, 85, 100, 125, 150, 200, 400, 800].includes(
+                zoom,
+              ) && <option value={zoom}>{Math.round(zoom)}%</option>}
+              {[25, 50, 60, 75, 85, 100, 125, 150, 200, 400, 800].map(
+                (value) => (
+                  <option key={value} value={value}>
+                    {value}%
+                  </option>
+                ),
+              )}
             </select>
           </nav>
+          {!!pages.length && (
+            <nav className="page-navigation" aria-label="Page navigation">
+              <button
+                aria-label="First page"
+                disabled={activeIndex === 0 || busy}
+                onClick={() => setActiveId(pages[0].id)}
+              >
+                «
+              </button>
+              <button
+                aria-label="Previous page"
+                disabled={activeIndex === 0 || busy}
+                onClick={() => setActiveId(pages[activeIndex - 1].id)}
+              >
+                ‹
+              </button>
+              <label>
+                Page{" "}
+                <input
+                  aria-label="Go to page"
+                  type="number"
+                  min="1"
+                  max={pages.length}
+                  value={pageJump}
+                  onChange={(e) => setPageJump(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") jumpPage();
+                  }}
+                />{" "}
+                of {pages.length}
+              </label>
+              <button onClick={jumpPage} disabled={busy}>
+                Go
+              </button>
+              <button
+                aria-label="Next page"
+                disabled={activeIndex === pages.length - 1 || busy}
+                onClick={() => setActiveId(pages[activeIndex + 1].id)}
+              >
+                ›
+              </button>
+              <button
+                aria-label="Last page"
+                disabled={activeIndex === pages.length - 1 || busy}
+                onClick={() => setActiveId(pages.at(-1)!.id)}
+              >
+                »
+              </button>
+              <small>Page Up / Page Down · Ctrl/Cmd+Home / End</small>
+            </nav>
+          )}
           {active && (tool === "text" || tool === "rectangle") && (
             <div className="tool-options">
               <label>
@@ -1216,7 +1558,14 @@ export default function App() {
                   aria-label="Annotation colour"
                   type="color"
                   value={color}
-                  onChange={(event) => setColor(event.target.value)}
+                  onChange={(event) => {
+                    setColor(event.target.value);
+                    if (tool === "text")
+                      styles.setLast({
+                        ...styles.last,
+                        color: event.target.value,
+                      });
+                  }}
                 />
               </label>
               {tool === "text" && (
@@ -1229,6 +1578,55 @@ export default function App() {
                   />
                 </label>
               )}
+              {tool === "text" && (
+                <>
+                  <label>
+                    Font
+                    <select
+                      aria-label="New text font"
+                      value={styles.last.font}
+                      onChange={(e) =>
+                        styles.setLast({
+                          ...styles.last,
+                          font: e.target.value as TextStyle["font"],
+                        })
+                      }
+                    >
+                      {[
+                        "Helvetica",
+                        "Helvetica-Bold",
+                        "Helvetica-Oblique",
+                        "Helvetica-BoldOblique",
+                        "Times-Roman",
+                        "Times-Bold",
+                        "Times-Italic",
+                        "Times-BoldItalic",
+                        "Courier",
+                        "Courier-Bold",
+                        "Courier-Oblique",
+                        "Courier-BoldOblique",
+                      ].map((f) => (
+                        <option key={f}>{f}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Size
+                    <input
+                      aria-label="New text size"
+                      type="number"
+                      min="1"
+                      max="300"
+                      value={styles.last.size}
+                      onChange={(e) => {
+                        const size = Number(e.target.value);
+                        if (size >= 1 && size <= 300)
+                          styles.setLast({ ...styles.last, size });
+                      }}
+                    />
+                  </label>
+                </>
+              )}
               <span>
                 {tool === "text"
                   ? "Click the page to place text. Basic Latin text for now."
@@ -1236,7 +1634,7 @@ export default function App() {
               </span>
             </div>
           )}
-          <div className="canvas-area">
+          <div className="canvas-area" ref={canvasArea}>
             {!active ? (
               <div className="welcome">
                 <div className="eyebrow">YOUR DOCUMENT. YOUR RULES.</div>
@@ -1284,7 +1682,10 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="document-wrap" style={{ width: `${zoom * 8}px` }}>
+              <div
+                className="document-wrap"
+                style={{ width: `${(viewWidth * zoom) / 100}px` }}
+              >
                 <div className="page-caption">
                   {showOriginal ? "ORIGINAL SOURCE · " : ""}PAGE{" "}
                   {activeIndex + 1} OF {pages.length}
@@ -1294,7 +1695,17 @@ export default function App() {
                     key={active.id + (showOriginal ? ":original" : "")}
                     source={source}
                     page={displayPage!}
-                    tool={busy || showOriginal ? "select" : tool}
+                    tool={busy || showOriginal ? "view" : tool}
+                    zoom={zoom}
+                    addStyle={styles.last}
+                    shapeSelected={selectedShapes}
+                    onShapeSelect={selectShape}
+                    onPageChange={(next) => {
+                      if (!busyRef.current)
+                        commit(
+                          pages.map((p) => (p.id === active.id ? next : p)),
+                        );
+                    }}
                     color={color}
                     text={text}
                     boxes={boxes}
@@ -1416,6 +1827,7 @@ export default function App() {
               );
             }}
           >
+            {itemControls()}
             <ReferenceAlignment
               page={active}
               runs={runs}
@@ -1426,6 +1838,7 @@ export default function App() {
               disabled={
                 busy ||
                 readingText ||
+                boxes.some((b) => selected.includes(b.id) && b.locked) ||
                 runState.pageId !== active.id ||
                 pageViewport.pageId !== active.id ||
                 pageViewport.rotation !== (active.rotation ?? 0)
@@ -1514,6 +1927,16 @@ export default function App() {
             />
           </OriginalTextEditor>
         )}
+        {tool === "select" && active && !showOriginal && (
+          <aside className="inspector text-editor">
+            <div className="panel-title">Arrange items</div>
+            <p className="hint">
+              Select text on the page, or click a rectangle border. Shift-click
+              to select several items.
+            </p>
+            {itemControls()}
+          </aside>
+        )}
         {inspection !== null && (
           <aside className="inspector">
             <div className="panel-title">
@@ -1540,6 +1963,17 @@ export default function App() {
           </aside>
         )}
       </main>
+      {(dialog === "export" || dialog === "utilities") && (
+        <PageUtilities
+          activeIndex={activeIndex}
+          mode={dialog === "export" ? "export" : "pages"}
+          pages={pages}
+          sources={sources}
+          onChange={commit}
+          onExport={download}
+          onClose={() => setDialog(null)}
+        />
+      )}
       {dialog === "search" && (
         <SearchPanel
           pages={pages}
@@ -1573,7 +2007,9 @@ export default function App() {
           onChange={commit}
           onOpen={setActiveId}
           onInsert={() => input.current?.click()}
-          onExtract={(chosen) => download(chosen, "extracted-pages.pdf")}
+          onExtract={async (chosen) => {
+            await download(chosen, "extracted-pages.pdf");
+          }}
           onClose={() => setDialog(null)}
         />
       )}

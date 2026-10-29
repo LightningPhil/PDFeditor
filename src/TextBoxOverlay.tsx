@@ -219,6 +219,13 @@ export function TextBoxOverlay({
                   onSelect(target, true);
                   return;
                 }
+                if (
+                  box.locked ||
+                  boxes.some((b) => selectedIds.has(b.id) && b.locked)
+                ) {
+                  onSelect(target);
+                  return;
+                }
                 const ids = selectedIds.has(target) ? selected : [target];
                 if (!selectedIds.has(target)) onSelect(target);
                 gesture.current = {
