@@ -29,3 +29,7 @@ samples/*
 
 # Recreated from the locked PDF.js package before dev/build.
 public/pdfjs/
+
+# Private sample-derived verification artifacts.
+output/
+tmp/

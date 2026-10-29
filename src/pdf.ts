@@ -1,4 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { replacePageText } from "./text-edit";
+import type { TextReplacement } from "./text-edit";
 
 export type Annotation = { id: string; color: string; x: number; y: number } & (
   | { kind: "text"; text: string; size: number }
@@ -14,6 +16,7 @@ export interface EditorPage {
   sourceId: string;
   index: number;
   annotations: Annotation[];
+  textReplacements?: TextReplacement[];
 }
 
 /** Copy pages without rasterising their original text or graphics. */
@@ -33,6 +36,7 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
     }
     const [page] = await output.copyPages(original, [item.index]);
     output.addPage(page);
+    replacePageText(page, item.textReplacements ?? []);
     for (const annotation of item.annotations) {
       const hex = annotation.color.replace("#", "");
       const color = rgb(

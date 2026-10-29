@@ -21,22 +21,40 @@ creates the production bundle. `npm test` runs the PDF export regression tests.
 - Select, reorder, or remove pages, with undo and redo.
 - Preview pages and add text or outline rectangles in a chosen colour.
 - Inspect extracted page text in a read-only panel.
+- Edit supported original text runs using the original font, colour and position.
 - Export a new PDF with original page content and new annotations.
 
 Edits live in memory: export before closing or refreshing the tab. Export does
 not change the originals. Imported sources remain in memory to support undo.
 
-## Existing-text editing: the priority for milestone two
+## Existing-text editing
 
-Existing page text cannot yet be changed. The UI deliberately distinguishes
-adding text from inspecting original text. Covering a word with a rectangle is
-not text removal or redaction, and is not our planned editing implementation.
+Choose **Edit text**, change a text run in the side panel, then **Apply change**.
+The page preview updates; edits participate in undo/redo and PDF export.
 
-PDF.js renders and extracts text. pdf-lib copies pages and writes annotations;
-it does not provide ordinary page-text replacement. Sample documents will guide
-the choice of an engine/content-stream editing layer and font handling. Before
-choosing an engine, assess licensing, browser support, text deletion/replacement,
-embedded subset fonts, layout fidelity, and whether OCR is needed for scans.
+The custom content-stream editor in `src/text-edit.ts` rewrites the original
+`Tj`/`TJ` drawing command. It does not cover text with rectangles or rasterise
+the page. Original font resources, text matrices and colours are retained.
+This is ordinary editing, not secure redaction or removal of metadata/history.
+
+Current support is deliberately limited: one text-showing command per text
+object, with simple WinAnsi/MacRoman fonts or single-byte `bfchar` Unicode maps.
+Embedded subset fonts allow only their available glyphs. Unsupported runs stay
+read-only, and missing glyphs cause an explicit error. Replacements are single
+lines and do not reflow surrounding content; longer text can overlap neighbours.
+Replacing a `TJ` run resets its internal kerning to the font's normal spacing.
+Composite/CID fonts, range-based CMaps, split text objects, Form XObject text,
+inline-image streams and text with ActualText or rendering-mode changes need
+further work. Scans need OCR.
+
+Local proof command (requires the optional PDF.js canvas dependency):
+
+```sh
+npx --yes --package tsx tsx scripts/prove-text-edit.ts samples/example.pdf "Old heading" "New heading" output/pdf/text-edit-proof
+```
+
+This edits the first page only, renders before/after PNGs and verifies the
+replacement using independent PDF.js text extraction. Outputs are Git-ignored.
 
 Put local examples and desired edits in `samples/`; they are ignored by Git.
 
@@ -47,7 +65,7 @@ support basic Latin characters; unsupported characters cause an explicit export
 error. Annotations are disabled for rotated pages, non-zero crop origins, and
 custom user units until coordinate handling is expanded. Shapes are rectangles
 only. Annotation selection/movement, thumbnails, autosave, password entry, OCR,
-and true text replacement are future work. Password-protected PDFs may fail to
+and broader text replacement are future work. Password-protected PDFs may fail to
 open. Page export is intended for ordinary static PDFs: document-level features
 such as bookmarks, signatures, forms, and tagged structure are not guaranteed
 to survive page copying. Signed originals should be retained.
@@ -56,6 +74,7 @@ to survive page copying. Signed originals should be retained.
 
 - `src/App.tsx`: import, rendering, page workspace, annotations, and history.
 - `src/pdf.ts`: document model and PDF export, kept independent of React.
+- `src/text-edit.ts`: conservative PDF tokeniser, font decoding and text replacement.
 - `src/pdf.test.ts`: generated-fixture checks for page copying and annotations.
 - `samples/`: private local examples; only its README is tracked.
 

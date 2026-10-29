@@ -23,10 +23,12 @@ import {
 } from "lucide-react";
 import { exportPdf } from "./pdf";
 import type { Annotation, EditorPage, Source } from "./pdf";
+import { inspectEditableText } from "./text-edit";
+import type { EditableRun, TextReplacement } from "./text-edit";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
-type Tool = "select" | "text" | "rectangle" | "inspect";
+type Tool = "select" | "text" | "rectangle" | "inspect" | "edit";
 type LoadedSource = Source & {
   document: PDFDocumentProxy;
   task: PDFDocumentLoadingTask;
@@ -59,14 +61,28 @@ function PageView({
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
     let cancelled = false;
+    let previewTask: PDFDocumentLoadingTask | undefined;
     let render:
       | ReturnType<Awaited<ReturnType<PDFDocumentProxy["getPage"]>>["render"]>
       | undefined;
     setReady(false);
-    void source.document
-      .getPage(page.index + 1)
+    void (async () => {
+      if (!page.textReplacements?.length)
+        return source.document.getPage(page.index + 1);
+      const data = await exportPdf([source], [{ ...page, annotations: [] }]);
+      if (cancelled) return null;
+      previewTask = getDocument({
+        data,
+        standardFontDataUrl: "/pdfjs/standard_fonts/",
+        cMapUrl: "/pdfjs/cmaps/",
+        cMapPacked: true,
+        wasmUrl: "/pdfjs/wasm/",
+      });
+      const document = await previewTask.promise;
+      return document.getPage(1);
+    })()
       .then(async (pdfPage) => {
-        if (cancelled || !canvas.current) return;
+        if (cancelled || !canvas.current || !pdfPage) return;
         const view = pdfPage.getViewport({ scale: 1 });
         setSize({ width: view.width, height: view.height });
         // Non-zero crop origins and rotated pages need explicit coordinate conversion.
@@ -91,8 +107,9 @@ function PageView({
     return () => {
       cancelled = true;
       render?.cancel();
+      void previewTask?.destroy();
     };
-  }, [source, page.id, page.index, onError]);
+  }, [source, page.id, page.index, page.textReplacements, onError]);
 
   function point(event: PointerEvent<SVGSVGElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -132,7 +149,7 @@ function PageView({
             void inspect();
             return;
           }
-          if (!supported || tool === "select") return;
+          if (!supported || tool === "select" || tool === "edit") return;
           const p = point(event);
           if (tool === "text" && text.trim())
             onAdd({
@@ -192,12 +209,118 @@ function PageView({
           ),
         )}
       </svg>
-      {!supported && tool !== "select" && tool !== "inspect" && (
-        <div className="page-notice">
-          Annotations on rotated or cropped pages are coming next.
-        </div>
-      )}
+      {!supported &&
+        tool !== "select" &&
+        tool !== "inspect" &&
+        tool !== "edit" && (
+          <div className="page-notice">
+            Annotations on rotated or cropped pages are coming next.
+          </div>
+        )}
     </div>
+  );
+}
+
+function OriginalTextEditor({
+  source,
+  page,
+  onApply,
+  onClose,
+}: {
+  source: Source;
+  page: EditorPage;
+  onApply: (edit: TextReplacement) => void;
+  onClose: () => void;
+}) {
+  const [runs, setRuns] = useState<EditableRun[] | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    void inspectEditableText(source.bytes, page.index)
+      .then((result) => {
+        if (!cancelled) setRuns(result);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(String(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source, page.index]);
+  return (
+    <aside className="inspector text-editor">
+      <div className="panel-title">
+        Edit original text
+        <button aria-label="Close text editor" onClick={onClose}>
+          <X size={17} />
+        </button>
+      </div>
+      <p>
+        Change a supported text run below. The original font, colour and
+        position stay in place. Text does not reflow; keep changes within the
+        available space.
+      </p>
+      {error && (
+        <p role="alert" className="edit-error">
+          {error}
+        </p>
+      )}
+      {runs === null && !error && <p>Reading original text…</p>}
+      {runs?.length === 0 && (
+        <p>
+          No supported text runs on this page yet. Scans, composite fonts and
+          text split across several drawing commands need further support.
+        </p>
+      )}
+      {runs?.map((run, index) => {
+        const current =
+          page.textReplacements?.find((edit) => edit.runId === run.id)
+            ?.replacement ?? run.text;
+        const draft = drafts[run.id] ?? current;
+        return (
+          <form
+            key={run.id}
+            className="text-run"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const missing = Array.from(draft).find(
+                (character) => !run.characters.includes(character),
+              );
+              if (missing) {
+                setError(
+                  `The original font does not contain “${missing}”. Try other text.`,
+                );
+                return;
+              }
+              setError("");
+              onApply({
+                runId: run.id,
+                original: run.text,
+                replacement: draft,
+              });
+            }}
+          >
+            <label>
+              Text {index + 1}
+              <input
+                aria-label={`Original text ${index + 1}`}
+                value={draft}
+                maxLength={1000}
+                onChange={(event) =>
+                  setDrafts((previous) => ({
+                    ...previous,
+                    [run.id]: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <small title={run.font}>{run.font}</small>
+            <button disabled={draft === current}>Apply change</button>
+          </form>
+        );
+      })}
+    </aside>
   );
 }
 
@@ -324,6 +447,7 @@ export default function App() {
     }
   }
   const tools = [
+    { id: "edit", label: "Edit text", icon: ScanText },
     { id: "select", label: "Select", icon: MousePointer2 },
     { id: "text", label: "Add text", icon: Type },
     { id: "rectangle", label: "Rectangle", icon: Square },
@@ -581,7 +705,9 @@ export default function App() {
                 </div>
                 <div className="development-note">
                   EARLY BUILD{" "}
-                  <span>Existing-text editing is the next milestone.</span>
+                  <span>
+                    Original-text editing now available for supported fonts.
+                  </span>
                 </div>
               </div>
             ) : (
@@ -630,6 +756,31 @@ export default function App() {
             <span>PDFeditor · First edition</span>
           </footer>
         </section>
+        {tool === "edit" && active && source && (
+          <OriginalTextEditor
+            key={active.id}
+            source={source}
+            page={active}
+            onClose={() => setTool("select")}
+            onApply={(edit) =>
+              commit(
+                pages.map((page) =>
+                  page.id === active.id
+                    ? {
+                        ...page,
+                        textReplacements: [
+                          ...(page.textReplacements ?? []).filter(
+                            (existing) => existing.runId !== edit.runId,
+                          ),
+                          ...(edit.replacement === edit.original ? [] : [edit]),
+                        ],
+                      }
+                    : page,
+                ),
+              )
+            }
+          />
+        )}
         {inspection !== null && (
           <aside className="inspector">
             <div className="panel-title">
@@ -642,7 +793,8 @@ export default function App() {
               </button>
             </div>
             <p>
-              Read-only inspection. Replacing original text is being developed.
+              Read-only extraction. Use Edit text to change supported original
+              text runs.
             </p>
             <textarea
               readOnly
