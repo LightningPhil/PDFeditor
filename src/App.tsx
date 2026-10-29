@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
@@ -37,6 +37,11 @@ import type { TextBox } from "./text-boxes";
 import { identity, inverseVector } from "./geometry";
 import type { Matrix } from "./geometry";
 import { readDocumentTextGroups } from "./text-group-storage";
+import {
+  neighbouringLine,
+  selectedTextBoxIds,
+  textMembersForBoxes,
+} from "./text-selection";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
@@ -46,6 +51,7 @@ type LoadedSource = Source & {
   task: PDFDocumentLoadingTask;
 };
 const uid = () => crypto.randomUUID();
+const emptyRuns: EditableRun[] = [];
 
 function PageView({
   source,
@@ -59,6 +65,7 @@ function PageView({
   boxes,
   selected,
   onSelect,
+  onSelection,
   onMoveText,
   onViewport,
 }: {
@@ -73,14 +80,16 @@ function PageView({
   boxes: TextBox[];
   selected: string[];
   onSelect: (id: string | null, extend?: boolean) => void;
+  onSelection: (ids: string[]) => void;
   onMoveText: (ids: string[], dx: number, dy: number) => void;
-  onViewport: (matrix: Matrix) => void;
+  onViewport: (matrix: Matrix, pageId: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 595, height: 842 });
   const [ready, setReady] = useState(false);
   const [supported, setSupported] = useState(false);
   const [viewport, setViewport] = useState<Matrix>(identity);
+  const [positionReady, setPositionReady] = useState(false);
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -108,7 +117,8 @@ function PageView({
         if (cancelled || !canvas.current || !pdfPage) return;
         const view = pdfPage.getViewport({ scale: 1 });
         setViewport(view.transform as Matrix);
-        onViewport(view.transform as Matrix);
+        onViewport(view.transform as Matrix, page.id);
+        setPositionReady(true);
         setSize({ width: view.width, height: view.height });
         // Non-zero crop origins and rotated pages need explicit coordinate conversion.
         setSupported(
@@ -246,12 +256,14 @@ function PageView({
       {tool === "edit" && (
         <TextBoxOverlay
           disabled={!ready}
+          positionReady={positionReady}
           boxes={boxes}
           selected={selected}
           viewport={viewport}
           width={size.width}
           height={size.height}
           onSelect={onSelect}
+          onSelection={onSelection}
           onMove={onMoveText}
         />
       )}
@@ -294,9 +306,12 @@ export default function App() {
   const active = pages.find((page) => page.id === activeId) ?? pages[0];
   const source = sources.find((item) => item.id === active?.sourceId);
   const activeIndex = pages.findIndex((page) => page.id === active?.id);
-  const [pageViewport, setPageViewport] = useState<Matrix>(identity);
+  const [pageViewport, setPageViewport] = useState<{
+    pageId: string;
+    matrix: Matrix;
+  }>({ pageId: "", matrix: identity() });
   const publishViewport = useCallback(
-    (matrix: Matrix) => setPageViewport(matrix),
+    (matrix: Matrix, pageId: string) => setPageViewport({ matrix, pageId }),
     [],
   );
   const [runState, setRunState] = useState<{
@@ -304,15 +319,22 @@ export default function App() {
     runs: EditableRun[];
   }>({ pageId: "", runs: [] });
   const [readingText, setReadingText] = useState(false);
-  const [selection, setSelection] = useState<{ pageId: string; ids: string[] }>(
-    { pageId: "", ids: [] },
+  const [selection, setSelection] = useState<{
+    pageId: string;
+    runIds: string[];
+  }>({ pageId: "", runIds: [] });
+  const runs = runState.pageId === active?.id ? runState.runs : emptyRuns;
+  const boxes = useMemo(
+    () => (active ? getTextBoxes(active, runs) : []),
+    [active, runs],
   );
-  const runs = runState.pageId === active?.id ? runState.runs : [];
-  const boxes = active ? getTextBoxes(active, runs) : [];
-  const selected =
-    selection.pageId === active?.id
-      ? selection.ids.filter((id) => boxes.some((box) => box.id === id))
-      : [];
+  const selected = useMemo(
+    () =>
+      selection.pageId === active?.id
+        ? selectedTextBoxIds(boxes, selection.runIds ?? [])
+        : [],
+    [selection, active?.id, boxes],
+  );
   useEffect(() => {
     if (!active || !source) return;
     let cancelled = false;
@@ -339,7 +361,8 @@ export default function App() {
     if (!active) return;
     setSelection({
       pageId: active.id,
-      ids:
+      runIds: textMembersForBoxes(
+        boxes,
         id === null
           ? []
           : extend
@@ -347,10 +370,22 @@ export default function App() {
               ? selected.filter((value) => value !== id)
               : [...selected, id]
             : [id],
+      ),
     });
   }
+  function selectTextIds(ids: string[]) {
+    if (active)
+      setSelection({
+        pageId: active.id,
+        runIds: textMembersForBoxes(boxes, ids),
+      });
+  }
+  const lineSelection = useMemo(
+    () => (selected.length === 1 ? neighbouringLine(boxes, selected[0]) : []),
+    [boxes, selected],
+  );
   function moveText(ids: string[], dx: number, dy: number) {
-    if (!active) return;
+    if (!active || busyRef.current) return;
     try {
       const next = moveTextBoxes(active, runs, ids, dx, dy);
       commit(pages.map((page) => (page.id === active.id ? next : page)));
@@ -359,24 +394,27 @@ export default function App() {
     }
   }
   function joinText() {
-    if (!active) return;
+    if (!active || busyRef.current) return;
     try {
       const id = `joined:${uid()}`;
       const next = joinTextBoxes(active, runs, selected, id);
       commit(pages.map((page) => (page.id === active.id ? next : page)));
-      setSelection({ pageId: active.id, ids: [id] });
+      setSelection({
+        pageId: active.id,
+        runIds: textMembersForBoxes(getTextBoxes(next, runs), [id]),
+      });
     } catch (cause) {
       setError(String(cause));
     }
   }
   function ungroupText() {
-    if (!active) return;
+    if (!active || busyRef.current) return;
     const members = boxes
       .filter((box) => selected.includes(box.id))
       .flatMap((box) => box.runs.map((run) => run.id));
     const next = ungroupTextBoxes(active, selected);
     commit(pages.map((page) => (page.id === active.id ? next : page)));
-    setSelection({ pageId: active.id, ids: members });
+    setSelection({ pageId: active.id, runIds: members });
   }
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -760,6 +798,7 @@ export default function App() {
                     boxes={boxes}
                     selected={selected}
                     onSelect={selectText}
+                    onSelection={selectTextIds}
                     onMoveText={moveText}
                     onViewport={publishViewport}
                     onAdd={(annotation) =>
@@ -801,17 +840,29 @@ export default function App() {
             page={active}
             boxes={boxes}
             loading={readingText}
+            busy={busy}
+            positionReady={pageViewport.pageId === active.id}
             error=""
             selected={selected}
             onSelect={selectText}
             onJoin={joinText}
+            onSelectLine={() => selectTextIds(lineSelection)}
+            canSelectLine={lineSelection.length > selected.length}
             onUngroup={ungroupText}
             onMove={(ids, dx, dy) => {
-              const delta = inverseVector(pageViewport, { x: dx, y: -dy });
+              if (pageViewport.pageId !== active.id) return;
+              const delta = inverseVector(pageViewport.matrix, {
+                x: dx,
+                y: -dy,
+              });
               moveText(ids, delta.x, delta.y);
             }}
             onClose={() => setTool("select")}
-            onApply={(edits) =>
+            onApply={(edits) => {
+              if (busyRef.current)
+                throw new Error(
+                  "Please wait for the current PDF operation to finish.",
+                );
               commit(
                 pages.map((page) =>
                   page.id === active.id
@@ -841,8 +892,8 @@ export default function App() {
                       }
                     : page,
                 ),
-              )
-            }
+              );
+            }}
           />
         )}
         {inspection !== null && (

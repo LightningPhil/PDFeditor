@@ -421,6 +421,23 @@ function streams(page: PDFPage): string[] {
     return binary(decodePDFRawStream(stream).decode());
   });
 }
+/** A non-security integrity stamp; detects stream rewrites before trusting IDs. */
+export function pageTextFingerprint(page: PDFPage): string {
+  let first = 2166136261,
+    second = 3339675911,
+    length = 0;
+  for (const stream of streams(page)) {
+    for (let index = 0; index < stream.length; index++) {
+      const value = stream.charCodeAt(index);
+      first = Math.imul(first ^ value, 16777619);
+      second = Math.imul(second ^ value, 2246822519);
+    }
+    first = Math.imul(first ^ 256, 16777619);
+    second = Math.imul(second ^ 256, 2246822519);
+    length += stream.length;
+  }
+  return `${length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
+}
 
 function runGeometry(run: Run, replacement?: string): EditableRun["geometry"] {
   if (
@@ -711,15 +728,15 @@ export function inspectPageText(
   page: PDFPage,
   replacements: TextReplacement[] = [],
 ): EditableRun[] {
+  const values = new Map(
+    replacements.map((edit) => [edit.runId, edit.replacement]),
+  );
   return findRuns(page, streams(page)).map((run) => ({
     id: run.id,
     text: run.text,
     font: run.font,
     characters: run.characters,
-    geometry: runGeometry(
-      run,
-      replacements.find((edit) => edit.runId === run.id)?.replacement,
-    ),
+    geometry: runGeometry(run, values.get(run.id)),
   }));
 }
 
@@ -732,6 +749,7 @@ export function replacePageText(
   if (!replacements.length && !offsets.length) return;
   const content = streams(page);
   const runs = findRuns(page, content);
+  const byId = new Map(runs.map((run) => [run.id, run]));
   const ids = new Set<string>();
   const replacementMap = new Map(
     replacements.map((edit) => [edit.runId, edit]),
@@ -754,7 +772,7 @@ export function replacePageText(
     };
     if (ids.has(edit.runId)) throw new Error("Duplicate text replacement");
     ids.add(edit.runId);
-    const run = runs.find((run) => run.id === edit.runId);
+    const run = byId.get(edit.runId);
     if (!run || run.text !== edit.original)
       throw new Error(
         "The original text changed. Reopen this page before editing.",

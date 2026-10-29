@@ -36,6 +36,10 @@ The page preview updates; edits participate in undo/redo and PDF export.
 
 In **Edit text**, drag a box on the page to reposition its text. Shift-click boxes
 or tick their side-panel checkboxes to select several, then choose **Join boxes**.
+You can also drag empty page space to select several sections. **Select line**
+expands a single selection to connected, aligned neighbours, including rotated
+text and smaller superscripts; wide gaps stop expansion to avoid crossing columns.
+Review the highlighted sections before joining.
 The joined selection has one outline and moves as a unit. **Ungroup** separates
 it again without changing its position. Arrow keys move a selected box by one
 point, or ten with Shift; the panel also has one-point nudge buttons. Original
@@ -56,6 +60,23 @@ Exports retain grouping in a private page dictionary (`PDFeditorTextGroups`).
 Reopening the exported PDF in PDFeditor restores the joined boxes, including
 previously added text. Other viewers ignore the metadata and display the same
 standard PDF text drawing operations. Export does not rasterise text.
+
+Group membership is disjoint and follows the original source ordering, even
+after merging interleaved groups. Stale selections and conflicting identifiers
+are rejected; damaged groups cannot cause a piece to move twice. A joined outline
+does not intercept clicks or drag-selection on unrelated text in its empty interior.
+Pending text changes must be applied or discarded before joining, and undo updates
+both the rendered page and editor fields. Selection follows the constituent pieces
+through joins, splits and undo/redo.
+
+Current group metadata is version 2, stored as Unicode-safe PDF strings. It
+records text/font/position anchors as well as a content stamp. Unchanged exports
+restore exact IDs; harmless content-stream rewrites can be recovered using unique
+anchors. Missing or ambiguous pieces cause that group to remain ungrouped, rather
+than silently attaching it to the wrong text. Legacy version-1 exports remain
+readable. Metadata decoding is bounded and avoids JavaScript argument limits for
+large groups; write/read limits use the same bounded metadata size and maximum
+of 100,000 pieces per page.
 
 The custom content-stream editor in `src/text-edit.ts` rewrites the original
 `Tj`/`TJ` drawing command. It does not cover text with rectangles or rasterise
@@ -108,6 +129,11 @@ reversible placement against all local text samples. It compares rendered pixels
 before/after joining and after restoring a move. `src/text-layout.test.ts` also
 checks mixed fonts, existing edits/offsets, kerning, neighbouring text, added text,
 page rotation, crop boxes, user units, skew and export/reimport.
+`src/text-boxes.test.ts` exercises 1,000 deterministic mixed join/move/ungroup
+operations and large selections. Selection tests cover column gaps, rotated
+quads and empty group interiors. Storage tests cover Unicode, large metadata,
+legacy files, malformed entries and rewritten streams. Render fuzz tests use
+mixed fonts, colours, opacity, skew and pre-existing edits across repeated exports.
 
 ## Current limits
 

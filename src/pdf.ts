@@ -3,6 +3,7 @@ import { replacePageText, inspectPageText } from "./text-edit";
 import { storePageTextGroups } from "./text-group-storage";
 import type { TextReplacement, TextOffset } from "./text-edit";
 import type { TextGroup } from "./text-boxes";
+import { assertTextGroups } from "./text-boxes";
 
 export type Annotation = { id: string; color: string; x: number; y: number } & (
   | { kind: "text"; text: string; size: number }
@@ -45,8 +46,15 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
     }
     const [page] = await output.copyPages(original, [item.index]);
     output.addPage(page);
+    const sourceRuns = item.textGroups?.length ? inspectPageText(page) : [];
+    const validGroups = assertTextGroups(item.textGroups ?? [], [
+      ...sourceRuns.map((run) => run.id),
+      ...item.annotations
+        .filter((annotation) => annotation.kind === "text")
+        .map((annotation) => `added:${annotation.id}`),
+    ]);
     const expected = item.textGroups?.length
-      ? inspectPageText(page).flatMap((run) => {
+      ? sourceRuns.flatMap((run) => {
           const text =
             item.textReplacements?.find((edit) => edit.runId === run.id)
               ?.replacement ?? run.text;
@@ -93,7 +101,12 @@ export async function exportPdf(sources: Source[], pages: EditorPage[]) {
           borderWidth: 2,
         });
     }
-    if (item.textGroups?.length) grouped.push({ page, item, expected });
+    if (validGroups.length)
+      grouped.push({
+        page,
+        item: { ...item, textGroups: validGroups },
+        expected,
+      });
   }
   if (grouped.length) {
     await output.flush();

@@ -64,7 +64,7 @@ for (const file of (await readdir("samples"))
     annotations: [],
   };
   const source = { id: "source", name: file, bytes };
-  const original = await render(await exportPdf([source], [model]));
+  const original = await render(bytes);
   // Join every supported run: includes different fonts, columns, scales and baselines.
   const joined =
     movable.length > 1
@@ -112,14 +112,16 @@ for (const file of (await readdir("samples"))
   report.push({
     file,
     status: "verified",
-    joinedRuns: movable.length,
-    joinPixelIdentical: true,
+    joinedRuns: movable.length > 1 ? movable.length : 0,
+    joinPixelIdentical: movable.length > 1 ? true : null,
     movementVisible: true,
     restorePixelIdentical: true,
   });
   console.log(
     file +
-      ": join identical; move visible; restore identical (" +
+      (movable.length > 1
+        ? ": join identical; move visible; restore identical ("
+        : ": single box; move visible; restore identical (") +
       movable.length +
       " pieces)",
   );
