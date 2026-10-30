@@ -3,6 +3,37 @@
 A TypeScript / React PDF workspace built with Vite. Local-first: PDF bytes stay in
 the browser. There is no upload service, account system, or paid API.
 
+**[Open PDFeditor in your browser](https://lightningphil.github.io/PDFeditor/)**
+— no installation needed. Use it from any PC with a modern browser.
+
+PDFeditor is [MIT licensed](LICENSE). Contributions, bug reports and improvements
+are welcome: open an issue or a pull request on this repository.
+
+Files and recovery copies stay in the browser on the computer where you open
+them. To continue on another PC, export your PDF and take it with you; documents
+are not synchronised between devices.
+
+## GitHub Pages deployment
+
+Every push to `main` runs the deployment workflow in
+`.github/workflows/pages.yml`: install locked dependencies, run the tests, compile
+the app for the Pages URL, and publish only `dist/`. Local samples and verification
+outputs are never included. The workflow can also be run manually from Actions.
+
+The repository's **Settings → Pages → Source** must be **GitHub Actions**.
+The build uses the Pages base path for scripts, the worker, fonts, CMaps and WASM
+codecs. It also works when this project is hosted under another path.
+
+To check the same project-path build locally:
+
+```sh
+npm run build -- --base=/PDFeditor/
+npm run preview -- --base=/PDFeditor/
+```
+
+Open the preview server's `/PDFeditor/` address. The ordinary development server
+still runs at `/` with `npm run dev`.
+
 ## Run
 
 Requires Node.js 22.12+ (Node 24 recommended).

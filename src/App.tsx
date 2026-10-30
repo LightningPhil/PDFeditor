@@ -1,3 +1,4 @@
+import { pdfAssetOptions } from "./pdfjs-assets";
 import {
   useCallback,
   useEffect,
@@ -90,10 +91,7 @@ async function restoreSources(saved: Source[]): Promise<LoadedSource[]> {
     for (const source of saved) {
       const task = getDocument({
         data: source.bytes.slice(),
-        standardFontDataUrl: "/pdfjs/standard_fonts/",
-        cMapUrl: "/pdfjs/cmaps/",
-        cMapPacked: true,
-        wasmUrl: "/pdfjs/wasm/",
+        ...pdfAssetOptions,
       });
       try {
         const document = await task.promise;
@@ -199,10 +197,7 @@ function PageView({
       if (cancelled) return null;
       previewTask = getDocument({
         data,
-        standardFontDataUrl: "/pdfjs/standard_fonts/",
-        cMapUrl: "/pdfjs/cmaps/",
-        cMapPacked: true,
-        wasmUrl: "/pdfjs/wasm/",
+        ...pdfAssetOptions,
       });
       const document = await previewTask.promise;
       return document.getPage(1);
@@ -1078,10 +1073,7 @@ export default function App() {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const task = getDocument({
           data: bytes.slice(),
-          standardFontDataUrl: "/pdfjs/standard_fonts/",
-          cMapUrl: "/pdfjs/cmaps/",
-          cMapPacked: true,
-          wasmUrl: "/pdfjs/wasm/",
+          ...pdfAssetOptions,
         });
         tasks.current.push(task);
         opening.push(task);
@@ -1786,7 +1778,23 @@ export default function App() {
                   ? "Ready when you are"
                   : "A fresh start for your documents"}
             </span>
-            <span>PDFeditor · First edition</span>
+            <span>
+              <a
+                href={`${import.meta.env.BASE_URL}LICENSE`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                MIT licensed
+              </a>
+              {" · "}
+              <a
+                href="https://github.com/LightningPhil/PDFeditor"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Contribute on GitHub
+              </a>
+            </span>
           </footer>
         </section>
         {tool === "edit" && active && source && !showOriginal && (

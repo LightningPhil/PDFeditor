@@ -1,3 +1,4 @@
+import { pdfAssetOptions } from "./pdfjs-assets";
 import { useEffect, useRef, useState } from "react";
 import { getDocument } from "pdfjs-dist";
 import type { PDFDocumentLoadingTask, RenderTask } from "pdfjs-dist";
@@ -37,10 +38,7 @@ function Thumbnail({ source, page }: { source: Source; page: EditorPage }) {
       if (cancelled) return;
       task = getDocument({
         data,
-        standardFontDataUrl: "/pdfjs/standard_fonts/",
-        cMapUrl: "/pdfjs/cmaps/",
-        cMapPacked: true,
-        wasmUrl: "/pdfjs/wasm/",
+        ...pdfAssetOptions,
       });
       const document = await task.promise,
         pdf = await document.getPage(1);

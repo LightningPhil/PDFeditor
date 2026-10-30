@@ -1,3 +1,4 @@
+import { pdfAssetOptions } from "./pdfjs-assets";
 import { useEffect, useMemo, useState } from "react";
 import { getDocument } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFDocumentLoadingTask } from "pdfjs-dist";
@@ -61,10 +62,7 @@ export function SearchPanel({
             const document = modified
               ? await (task = getDocument({
                   data: await exportPagePreview(source, page, true),
-                  standardFontDataUrl: "/pdfjs/standard_fonts/",
-                  cMapUrl: "/pdfjs/cmaps/",
-                  cMapPacked: true,
-                  wasmUrl: "/pdfjs/wasm/",
+                  ...pdfAssetOptions,
                 })).promise
               : source.document;
             const pdf = await document.getPage(modified ? 1 : page.index + 1),
